@@ -1,0 +1,313 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Selected state of a toggle. A tooltip trigger takes over data-state, so ARIA is read too. */
+@custom-variant on (&[data-state="on"], &[aria-pressed="true"], &[aria-checked="true"]);
+
+/* Retheme Scenic by editing this block. Everything visual reads from these tokens. */
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces, lightest first. Colour comes from the map art, so these stay near-neutral. */
+  --background: oklch(0.975 0.004 85);
+  --card: oklch(0.955 0.005 85);
+  --popover: oklch(0.99 0.003 85);
+  --input: oklch(0.925 0.006 85);
+  --accent: oklch(0.905 0.007 85);
+  --muted: oklch(0.925 0.006 85);
+  --secondary: oklch(0.925 0.006 85);
+
+  /* Ink */
+  --foreground: oklch(0.23 0.01 70);
+  --card-foreground: var(--foreground);
+  --popover-foreground: var(--foreground);
+  --accent-foreground: var(--foreground);
+  --secondary-foreground: var(--foreground);
+  --muted-foreground: oklch(0.46 0.012 75);
+
+  /* The one warm accent, deeper so it holds up on a light page */
+  --primary: oklch(0.5 0.105 80);
+  --primary-foreground: oklch(0.99 0.008 88);
+  --ring: oklch(0.5 0.105 80);
+
+  /* The edge of any control, at 3:1 against the page: fields, off switches, slider tracks */
+  --input-border: oklch(0.6 0.012 80);
+
+  /* Status */
+  --success: oklch(0.5 0.12 145);
+  --destructive: oklch(0.53 0.18 30);
+
+  /* Hairlines are rare; this is what they use when they appear. */
+  --border: oklch(0 0 0 / 9%);
+
+  /* The print canvas */
+  --canvas: oklch(0.89 0.005 85);
+  --canvas-sheet: oklch(0.985 0.003 85);
+
+  /* Shape and density */
+  --radius: 0.625rem;
+  --control: 2.25rem;
+  --control-sm: 1.75rem;
+  --bar: 4rem;
+  --gutter: 1.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.155 0.004 70);
+    --card: oklch(0.19 0.005 70);
+    --popover: oklch(0.215 0.005 70);
+    --input: oklch(0.245 0.006 70);
+    --accent: oklch(0.29 0.007 70);
+    --muted: oklch(0.245 0.006 70);
+    --secondary: oklch(0.245 0.006 70);
+
+    --foreground: oklch(0.94 0.012 85);
+    --muted-foreground: oklch(0.72 0.015 80);
+
+    --primary: oklch(0.83 0.115 88);
+    --primary-foreground: oklch(0.21 0.02 88);
+    --ring: oklch(0.83 0.115 88);
+    --input-border: oklch(0.52 0.012 80);
+
+    --success: oklch(0.77 0.1 140);
+    --destructive: oklch(0.73 0.14 30);
+
+    --border: oklch(1 0 0 / 7%);
+
+    --canvas: oklch(0.125 0.004 70);
+    --canvas-sheet: oklch(0.255 0.006 70);
+  }
+}
+
+@media (max-width: 40rem) {
+  :root {
+    --control: 2.5rem;
+    --control-sm: 2.25rem;
+    --bar: 3.5rem;
+    --gutter: 1rem;
+  }
+}
+
+@theme inline {
+  --font-sans: 'Jost Variable', system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+
+  /* Jost has a small x-height, so the small UI sizes sit a step above Tailwind's. */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
+  --text-sm: 0.9375rem;
+  --text-sm--line-height: 1.375rem;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-canvas: var(--canvas);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply bg-background font-sans antialiased;
+  }
+  body {
+    @apply min-h-dvh bg-background text-foreground;
+  }
+  input[type='number'] {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* One focus indicator everywhere, outside the layers so no component can dim it. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+h1:focus,
+main:focus {
+  outline: none;
+}
+
+[data-slot='input'],
+[data-slot='select-trigger'],
+[data-slot='input-group'] {
+  border-color: var(--input-border);
+}
+
+/* Fingers need bigger targets than pointers. */
+@media (pointer: coarse) {
+  :root {
+    --control: 2.75rem;
+    --control-sm: 2.75rem;
+  }
+  [data-size='icon-xs'] {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  [data-slot='breadcrumb-link'],
+  .touch-target {
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+  }
+}
+
+/* The print preview. These are SVG elements inside a scaled viewBox, drawn in map millimetres,
+   so sizes and stroke behaviour cannot be expressed as utilities on a component. */
+.canvas-sheet {
+  fill: var(--canvas-sheet);
+}
+svg:focus-visible .canvas-page[data-cursor='true'] rect {
+  stroke: var(--ring);
+  stroke-width: 3;
+}
+.canvas-page rect {
+  fill: transparent;
+  stroke: oklch(1 0 0 / 80%);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+  transition: fill 100ms ease;
+}
+.canvas-page:hover rect {
+  fill: oklch(from var(--primary) l c h / 12%);
+}
+.canvas-page[data-selected='true'] rect {
+  fill: oklch(from var(--primary) l c h / 20%);
+  stroke: var(--primary);
+  stroke-width: 2;
+}
+.canvas-page text {
+  fill: oklch(1 0 0 / 90%);
+  paint-order: stroke;
+  stroke: oklch(0 0 0 / 60%);
+  stroke-width: 0.06em;
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-weight: 500;
+  pointer-events: none;
+}
+svg:not([data-tool='select'], [data-tool='lasso']) .canvas-page rect {
+  cursor: inherit;
+}
+.canvas-marquee {
+  fill: oklch(from var(--primary) l c h / 12%);
+  stroke: var(--primary);
+  stroke-dasharray: 4 3;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.canvas-crop-dim {
+  fill: oklch(0 0 0 / 62%);
+  fill-rule: evenodd;
+  pointer-events: none;
+}
+.canvas-crop-edge {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.canvas-crop-handle {
+  fill: var(--primary);
+  stroke: var(--primary-foreground);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.canvas-fog-cover {
+  opacity: 0.88;
+  pointer-events: none;
+}
+.canvas-fog-edge,
+.canvas-fog-off,
+.canvas-shape-line {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.canvas-fog-edge {
+  stroke: var(--primary);
+  stroke-width: 1.5;
+}
+.canvas-fog-edge[data-mode='show'],
+.canvas-fog-off {
+  stroke: var(--primary);
+  stroke-dasharray: 6 4;
+  stroke-width: 1;
+}
+.canvas-fog-off {
+  opacity: 0.6;
+}
+.canvas-fog-name {
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+.canvas-shape-line {
+  stroke: var(--primary);
+  stroke-width: 1;
+}
+svg[data-tool='fog'] .canvas-page {
+  opacity: 0.3;
+  pointer-events: none;
+}
+.canvas-shape-point {
+  fill: var(--primary-foreground);
+  stroke: var(--primary);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+.canvas-shape-point[data-on='true'] {
+  fill: var(--primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+.canvas-sheet-edge {
+  fill: none;
+  stroke: var(--primary);
+  stroke-opacity: 0.7;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}

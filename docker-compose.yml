@@ -1,0 +1,23 @@
+services:
+  scenic:
+    build: .
+    image: scenic:latest
+    container_name: scenic
+    ports:
+      - "8420:8420"
+    volumes:
+      # Change the left side to the folder on your NAS that holds your battle maps.
+      # Read-only on purpose: Scenic never changes your maps. Delete files from the NAS; the next scan drops them.
+      - /volume1/maps:/maps:ro
+      # Library database and thumbnails.
+      - scenic-data:/data
+    # Stays off until you start it, including after a NAS reboot.
+    restart: "no"
+    # environment:
+    #   SCENIC_PASSWORD: "change-me"   # HTTP basic auth, user "scenic" (empty = open access)
+    #   SCENIC_WORKERS: "2"            # parallel image workers (default: half the CPU cores, 1-4)
+    #   SCENIC_CACHE_MB: "8192"        # disk cache limit in MB (default 8192)
+    #   SCENIC_RESCAN_MINUTES: "60"    # how often to look for new maps (default 60)
+
+volumes:
+  scenic-data:

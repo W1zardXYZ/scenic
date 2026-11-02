@@ -1,0 +1,8 @@
+node_modules
+dist
+data
+.dev
+.DS_Store
+*.log
+TestFiles
+.claude

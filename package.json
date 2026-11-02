@@ -1,0 +1,50 @@
+{
+  "name": "scenic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"node --watch server/index.ts\" \"vite\"",
+    "build": "NODE_ENV=production vite build",
+    "start": "npm run build && node server/index.ts",
+    "stop": "lsof -iTCP:8420 -sTCP:LISTEN -t | xargs kill",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"server/**/*.test.ts\" \"shared/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.14",
+    "pdfkit": "^0.20.2",
+    "polygon-clipping": "^0.15.7",
+    "sharp": "^0.35.5",
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1"
+  },
+  "devDependencies": {
+    "@fontsource-variable/jost": "^5.3.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.6.6",
+    "@types/pdfkit": "^0.17.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/yauzl": "^3.4.0",
+    "@types/yazl": "^3.3.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "class-variance-authority": "^0.7.1",
+    "cn": "^0.5.1",
+    "concurrently": "^10.0.6",
+    "lucide-react": "^1.66.0",
+    "radix-ui": "^1.8.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "shadcn": "^4.23.0",
+    "sonner": "^2.0.8",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}

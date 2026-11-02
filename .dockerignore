@@ -1,0 +1,13 @@
+TestFiles
+node_modules
+dist
+data
+.dev
+.DS_Store
+.git
+.gitignore
+Dockerfile
+.dockerignore
+docker-compose.yml
+*.log
+**/*.test.ts
