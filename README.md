@@ -8,6 +8,8 @@ Your files are only read. Everything Scenic creates lives in its data folder.
 
 A ready-made image for amd64 and arm64 is at `ghcr.io/w1zardxyz/scenic:latest`, so a NAS can pull it without building. Mount your maps read-only at `/maps` and a writable folder at `/data`, and expose port 8420.
 
+For TrueNAS, paste [`deploy/truenas/scenic.yaml`](deploy/truenas/scenic.yaml) into **Apps → Discover Apps → Custom App → Install via YAML**.
+
 To build it yourself, edit the maps path in `docker-compose.yml`, then:
 
 ```bash

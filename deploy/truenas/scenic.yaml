@@ -1,0 +1,38 @@
+# ============================================================
+#  TrueNAS app name:  scenic
+#  Install: Apps -> Discover Apps -> Custom App -> Install via YAML
+# ============================================================
+#  Before installing:
+#    1. mkdir -p /mnt/HDDs/media/maps    and copy your maps in
+#    2. Create the dataset SSDs/apps/scenic (preset: Apps),
+#       owner and group: apps (568)
+#  Access: http://192.168.0.70:8425  (LAN / Tailscale only)
+#          Do NOT add to the Cloudflare tunnel without a password.
+#  Then:   Settings -> Folders -> add /maps
+# ============================================================
+
+name: scenic
+
+services:
+  scenic:
+    container_name: scenic
+    image: ghcr.io/w1zardxyz/scenic:latest
+    user: "568:568"            # apps user; it must own /mnt/SSDs/apps/scenic
+    environment:
+      - TZ=Europe/Berlin
+      - SCENIC_WORKERS=1       # one map at a time: the N100 is shared with the media stack
+      - SCENIC_CACHE_MB=4096   # print cache on the SSD; oldest files are evicted
+      # Optional login, user "scenic". Only worth it beyond Tailscale:
+      # - SCENIC_PASSWORD=change-me
+    volumes:
+      - /mnt/SSDs/apps/scenic:/data
+      # Read-only on purpose: Scenic can never change your maps.
+      - /mnt/HDDs/media/maps:/maps:ro
+    ports:
+      - '8425:8420'            # host 8425 -> container 8420 (Stash's example uses 8420)
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 3g              # large maps decode into memory; keeps the ZFS ARC safe
+    cpus: 3
+    # Stays off after a reboot; start it from Apps when you want to ingest or print.
+    restart: "no"
