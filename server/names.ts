@@ -1,6 +1,9 @@
 // Reads what creators encode in file and folder names.
 
+import { levelOf } from '../shared/levels.ts'
 import type { VariantKind } from '../shared/types.ts'
+
+export { levelOf }
 
 export interface ParsedName {
   /** Words of the name without size, ppi, version and grid markers. */
@@ -114,32 +117,8 @@ export function provenance(chain: FolderChain, shareMentioningFolder: number): {
   return !chain.underPlatform && shareMentioningFolder >= 1 / 3 ? { creator: '', pack: first } : { creator: first, pack: '' }
 }
 
-const LEVELS: [RegExp, number][] = [
-  [/^(?:sub)?basements?$|^cellars?$|^undercroft$|^sewers?$/, -1],
-  [/^lower$|^downstairs$/, -0.5],
-  [/^ground$|^main$/, 0],
-  [/^upper$|^upstairs$|^second$|^2nd$/, 1],
-  [/^third$|^3rd$/, 2],
-  [/^attic$|^loft$/, 3],
-  [/^roofs?$|^rooftops?$|^exterior$/, 4],
-]
-
-/** Height of a map within its building, when the words say; floors count from the ground. */
-export function levelOf(words: string[]): number | null {
-  const lower = words.map((w) => w.toLowerCase())
-  for (const [i, word] of lower.entries()) {
-    const floor = /^(?:floor|level|lvl|storey|story|deck|f|l)-?(\d+)$/.exec(word)
-    if (floor) return Number(floor[1])
-    if (/^(?:floor|level|lvl|storey|story|deck)$/.test(word) && /^\d+$/.test(lower[i + 1] ?? '')) return Number(lower[i + 1])
-    const below = /^b-?(\d+)$/.exec(word)
-    if (below) return -Number(below[1])
-    for (const [pattern, height] of LEVELS) if (pattern.test(word)) return height
-  }
-  return null
-}
-
 const SKIP_DIR = /^(?:tokens?|portraits?|music|audio|sounds?|pdfs?|handouts?|art|artwork|assets?|sprites?|icons?|__macosx)$/i
-const SKIP_FILE = /\b(?:preview|thumb(?:nail)?s?|cover|promo|poster|banner|watermark(?:ed)?|logo|credits?)\b/i
+const SKIP_FILE = /\b(?:stat[\s-]*blocks?|preview|thumb(?:nail)?s?|cover|promo|poster|banner|watermark(?:ed)?|logo|credits?)\b/i
 
 /** Packs bundle tokens, covers and art with the maps; those never belong in the library. */
 export function isLikelyMap(dirs: string[], stem: string): boolean {

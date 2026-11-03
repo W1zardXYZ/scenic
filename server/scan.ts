@@ -117,7 +117,11 @@ async function scanRoot(root: Root): Promise<void> {
       const rows = inZip.all(path) as { entry: string }[]
       const unchanged = rows.length && (known.get(path) as { mtime: number })?.mtime === zipInfo.mtimeMs
       if (unchanged) {
-        for (const row of rows) seen.add(`${path}\0${row.entry}`)
+        // Skip rules may have changed since the zip was read; anything they now exclude is left unseen and removed.
+        for (const row of rows) {
+          const parts = row.entry.split('/').filter(Boolean)
+          if (isLikelyMap(parts.slice(0, -1), parts.at(-1)!.replace(/\.[^.]+$/, ''))) seen.add(`${path}\0${row.entry}`)
+        }
         return
       }
       const entries = await listZip(path).catch((error) => {

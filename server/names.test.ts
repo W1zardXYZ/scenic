@@ -175,3 +175,12 @@ test('classify: biomes use the path too, time and weather only the name', () => 
   assert.equal(c.weather, '')
   assert.deepEqual(classify('Ruined Temple Castle', 'x').biomes.sort(), ['Castle', 'Temple'])
 })
+
+test('stat blocks are not maps', () => {
+  assert.equal(isLikelyMap(['Questiary Monsters', 'Siren Grass'], '22-1_1_SirenGrass_statblock'), false)
+  assert.equal(isLikelyMap([], 'Goblin Stat Block'), false)
+})
+
+test('interior and exterior are two views of one place', () => {
+  assert.equal(describesCondition(['Night', 'Interior']), true)
+})

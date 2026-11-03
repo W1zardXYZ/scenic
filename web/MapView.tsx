@@ -10,6 +10,7 @@ import { UNDO_MS } from '@/components/ui/sonner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
+import { splitVariant } from '../shared/levels.ts'
 import { api, thumb } from './api.ts'
 import { bestVersion, type Index, pageSpec, type Prefs } from './filters.ts'
 import { EditDialog } from './EditDialog.tsx'
@@ -87,6 +88,14 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
     variants: variants.filter(([, list]) => kinds.includes(list[0].variantKind)),
   })).filter((section) => section.variants.length), [variants])
   const ordered = useMemo(() => sections.flatMap((section) => section.variants), [sections])
+  // Floors run top to bottom, how each looks runs across, once a scene varies both ways.
+  const matrix = useMemo(() => {
+    const cells = ordered.map((variant) => ({ variant, ...splitVariant(variant[0]) }))
+    const floors = [...new Map(cells.map((c) => [c.floor, c.height ?? 0]))].sort((a, b) => b[1] - a[1]).map(([floor]) => floor)
+    const looks = [...new Set(cells.map((c) => c.look))]
+    if (floors.length < 2 || looks.length < 2) return null
+    return { looks, rows: floors.map((floor) => ({ floor, cells: looks.map((look) => cells.find((c) => c.floor === floor && c.look === look)?.variant) })) }
+  }, [ordered])
   const [format, setFormat] = useState('webp')
   const [quality, setQuality] = useState(85)
   const [pps, setPps] = useState(0)
@@ -94,20 +103,61 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
   const [lightbox, setLightbox] = useState(false)
   const [editing, setEditing] = useState(false)
 
+  /** A variant's thumbnail; in the matrix the row and column headings name it, so `label` is only for screen readers. */
+  const thumbLink = ([name, list]: [string, MapRecord[]], label?: string) => {
+    const best = bestVersion(list)
+    const on = name === map.variant
+    return (
+      <a
+        key={name}
+        ref={on ? current : undefined}
+        href={`#/map/${best.id}`}
+        aria-current={on ? 'true' : undefined}
+        aria-label={label}
+        className="group/thumb flex w-20 shrink-0 flex-col gap-1 rounded-md text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring aria-[current=true]:text-foreground"
+      >
+        <span className={cn('block h-14 overflow-hidden rounded-md opacity-70 transition-opacity group-hover/thumb:opacity-100', on && 'opacity-100 ring-2 ring-primary')}>
+          <img src={thumb(best, 'small')} alt="" loading="lazy" className="size-full object-cover" />
+        </span>
+        {!label && <span className="truncate" title={name || 'Standard'}>{name || 'Standard'}</span>}
+      </a>
+    )
+  }
+
   const close = () => (window.location.hash = backHash)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
+      const across = e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+      const down = matrix && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+      if (e.defaultPrevented || !(across || down)) return
       // Arrow keys belong to whichever control has focus.
       if ((e.target as Element).closest('input, [role=slider], [role=tab], [role=radio], [role=listbox], [role=menu]')) return
-      const at = ordered.findIndex(([v]) => v === map.variant)
-      const next = ordered[(at + (e.key === 'ArrowRight' ? 1 : ordered.length - 1)) % ordered.length]
-      window.location.hash = `#/map/${bestVersion(next[1]).id}`
+      const go = (variant: [string, MapRecord[]]) => (window.location.hash = `#/map/${bestVersion(variant[1]).id}`)
+      if (!matrix) {
+        const at = ordered.findIndex(([v]) => v === map.variant)
+        return go(ordered[(at + (e.key === 'ArrowRight' ? 1 : ordered.length - 1)) % ordered.length])
+      }
+      e.preventDefault()
+      const { rows } = matrix
+      const r = rows.findIndex((row) => row.cells.some((c) => c?.[0] === map.variant))
+      const c = rows[r].cells.findIndex((cell) => cell?.[0] === map.variant)
+      if (across) {
+        const filled = rows[r].cells.filter((cell) => cell !== undefined)
+        const at = filled.findIndex((cell) => cell[0] === map.variant)
+        return go(filled[(at + (e.key === 'ArrowRight' ? 1 : filled.length - 1)) % filled.length])
+      }
+      const row = rows[(r + (e.key === 'ArrowDown' ? 1 : rows.length - 1)) % rows.length]
+      // The same column if the floor has it, else the nearest one it does.
+      const nearest = row.cells
+        .map((cell, i) => ({ cell, distance: Math.abs(i - c) }))
+        .filter((x) => x.cell !== undefined)
+        .sort((a, b) => a.distance - b.distance)[0]
+      go(nearest.cell!)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [ordered, map.variant])
+  }, [ordered, matrix, map.variant])
 
   // Runs first so an open tooltip cannot swallow the key.
   useEffect(() => {
@@ -182,28 +232,32 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
           )}
           {variants.length > 1 && (
             <nav aria-label="Variants" className="flex [justify-content:safe_center] gap-6 overflow-x-auto px-3 pt-1 pb-3 [scrollbar-width:none] lg:px-8 lg:pb-6">
-              {sections.map((section) => (
+              {matrix ? (
+                <table className="shrink-0 border-separate border-spacing-x-2 border-spacing-y-1 text-xs text-muted-foreground">
+                  <thead>
+                    <tr>
+                      <td />
+                      {matrix.looks.map((look) => <th key={look} scope="col" className="text-left font-normal">{look || 'Standard'}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {matrix.rows.map((row) => (
+                      <tr key={row.floor}>
+                        <th scope="row" className="pr-1 text-left font-normal">{row.floor || 'Standard'}</th>
+                        {row.cells.map((cell, i) => (
+                          <td key={matrix.looks[i]}>
+                            {cell ? thumbLink(cell, `${row.floor} ${matrix.looks[i]}`.trim()) : <span className="block h-14 w-20 rounded-md border border-dashed border-border" />}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : sections.map((section) => (
                 <section key={section.label} aria-label={section.label} className="flex shrink-0 flex-col gap-2">
                   {(sections.length > 1 || section.label !== 'Versions') && <h2 className="text-xs text-muted-foreground">{section.label}</h2>}
                   <div className="flex gap-2">
-                    {section.variants.map(([name, list]) => {
-                      const best = bestVersion(list)
-                      const on = name === map.variant
-                      return (
-                        <a
-                          key={name}
-                          ref={on ? current : undefined}
-                          href={`#/map/${best.id}`}
-                          aria-current={on ? 'true' : undefined}
-                          className="group/thumb flex w-20 shrink-0 flex-col gap-1 rounded-md text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring aria-[current=true]:text-foreground"
-                        >
-                          <span className={cn('block h-14 overflow-hidden rounded-md opacity-70 transition-opacity group-hover/thumb:opacity-100', on && 'opacity-100 ring-2 ring-primary')}>
-                            <img src={thumb(best, 'small')} alt="" loading="lazy" className="size-full object-cover" />
-                          </span>
-                          <span className="truncate" title={name || 'Standard'}>{name || 'Standard'}</span>
-                        </a>
-                      )
-                    })}
+                    {section.variants.map((variant) => thumbLink(variant))}
                   </div>
                 </section>
               ))}
