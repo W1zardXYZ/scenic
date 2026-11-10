@@ -23,6 +23,7 @@ const SQUARE_PRESETS = [[String(25.4), '1 inch'], ['25', '25 mm'], ['30', '30 mm
 const OVERLAY_COLORS = ['#000000', '#ffffff', '#c23b32']
 const INK_MODES = [['color', 'Colour'], ['light', 'Saver'], ['grey', 'Grey'], ['threshold', 'B&W']] as const
 const PAPER_OPTIONS = PAPERS.map((p) => [p.id, p.label] as const)
+const FOG_PAPER_OPTIONS = [['map', 'Same as the map'] as const, ...PAPER_OPTIONS]
 const TAB = 'flex flex-col gap-8 pb-(--gutter)'
 
 /** After a change that removes the focused control, once the new controls are on the page. */
@@ -373,6 +374,14 @@ export const Settings = memo(function Settings({
                     onCheckedChange={(separate) => setFog({ ...fog, separate })}
                   />
                   {!fog.separate && <SwitchRow label="Outline on the map" checked={fog.outline} onCheckedChange={(outline) => setFog({ ...fog, outline })} />}
+                  {fog.separate && (
+                    <SelectField
+                      label="Fog card paper"
+                      value={fog.paper ?? 'map'}
+                      options={FOG_PAPER_OPTIONS}
+                      onChange={(paper) => setFog({ ...fog, paper: paper === 'map' ? undefined : paper })}
+                    />
+                  )}
                   <SwitchRow
                     label="Print area names"
                     hint={fog.names ? 'Players will see them' : fog.separate ? 'Hidden from players. The overview still lists them' : 'Hidden from players'}

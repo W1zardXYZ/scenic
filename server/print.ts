@@ -4,7 +4,7 @@ import PDFDocument from 'pdfkit'
 import sharp from 'sharp'
 import yazl from 'yazl'
 import {
-  assemblyPlan, type Edge, edgeLines, FOG_TAB_MM, gridSegments, hexNumbers, intersect, type Page, paperOf, type Rect,
+  assemblyPlan, type Edge, edgeLines, FOG_TAB_MM, PAPERS, gridSegments, hexNumbers, intersect, type Page, paperOf, type Rect,
   type Segment, type Side,
 } from '../shared/layout.ts'
 import { fadeMask, fadeRegion } from '../shared/fade.ts'
@@ -70,7 +70,7 @@ export function validatePrint(q: PrintRequest): string | null {
   if (!finite(black, 0, 254) || !finite(white, 1, 255) || black >= white || !finite(gamma, 0.1, 10)) return 'levels'
   if (!q.marks) return 'marks'
   if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill) ||
-    !['undefined', 'boolean'].includes(typeof q.fog.names)) return 'fog'
+    !['undefined', 'boolean'].includes(typeof q.fog.names) || (q.fog.paper !== undefined && !PAPERS.some((p) => p.id === q.fog.paper))) return 'fog'
   if (q.crop && !isRect(q.crop)) return 'crop'
   if (q.fadeMm !== undefined && !finite(q.fadeMm, 0, 200)) return 'fade'
   if (!q.output || !['pdf', 'png'].includes(q.output.format) || !(q.output.quality in MAX_PPI)) return 'output'
@@ -417,10 +417,10 @@ function cardLayer(q: PrintRequest, card: FogCard, pxPerMm: number, labels: Labe
 const PLACE_INK = '#d81b60'
 
 /** Where the printed part of the map sits on the placement page, turned whichever way shows it largest. */
-function placementLayout(q: PrintRequest) {
+function placementLayout(q: PrintRequest, plan: FogPlan) {
   const map = { x: 0, y: 0, w: q.grid.cols * q.squareMm, h: q.grid.rows * q.squareMm }
   const view = (q.crop && intersect(map, q.crop)) || map
-  const { sheetW, sheetH } = q.pages[0]
+  const { sheetW, sheetH } = plan
   const margin = Math.max(q.marginMm, 10)
   const head = 16
   const fit = (w: number, h: number) => {
@@ -740,7 +740,7 @@ async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: 
 }
 
 async function drawPlacementPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, plan: FogPlan) {
-  const L = placementLayout(q)
+  const L = placementLayout(q, plan)
   doc.addPage({ size: [L.sheetW * MM, L.sheetH * MM], margin: 0 })
   doc.image(await placementMap(q, file, L), L.x * MM, L.y * MM, { width: L.view.w * L.scale * MM, height: L.view.h * L.scale * MM })
   const lines = await rasterSvg(placementSvg(plan, L, []), L.sheetW, L.sheetH, FOG_PX_PER_MM)
@@ -766,14 +766,16 @@ async function drawFogSheet(doc: PDFKit.PDFDocument, q: PrintRequest, plan: FogP
   }
 }
 
-async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: string, progress: (done: number) => void) {
-  const title = `${file.name}`.replace(/\s+/g, ' ')
-  // The bundled face rather than a PDF base font, so PDF text matches the outlined text in the raster layers.
+/** A PDF in the bundled face rather than a PDF base font, so its text matches the outlined text in the raster layers. */
+async function writeDoc(target: string, title: string, draw: (doc: PDFKit.PDFDocument) => Promise<void>) {
   const doc = new PDFDocument({ autoFirstPage: false, compress: true, font: FONT_FILE.regular, info: { Title: title, Creator: 'Scenic' } })
   const out = doc.pipe(createWriteStream(target))
-  const plan = fogPlanFor(q)
-  if (q.marks.overview) await drawOverviewPage(doc, q, file, title, plan)
+  await draw(doc)
+  doc.end()
+  await finished(out)
+}
 
+async function drawMapSheets(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, raster: string, title: string, progress: (done: number) => void) {
   let done = 0
   for await (const [sheet, tile] of tiles(q.pages.map(sheetOf), (s) => renderTile(raster, q, file, s.page, 'jpeg'))) {
     doc.addPage({ size: [sheet.w * MM, sheet.h * MM], margin: 0 })
@@ -790,11 +792,12 @@ async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: 
     if (fog) doc.image(fog, sheet.left * MM, sheet.top * MM, { width: sheet.page.w * MM, height: sheet.page.h * MM })
     progress(++done)
   }
-  // The overview already shows where the fog goes; without one, the placement gets its own page.
-  if (plan.sheets && !q.marks.overview) await drawPlacementPage(doc, q, file, plan)
+}
+
+async function drawFogCards(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, plan: FogPlan, title: string) {
+  // The overview already shows where the fog goes; without one, the cards bring their own placement page.
+  if (!q.marks.overview) await drawPlacementPage(doc, q, file, plan)
   for (const [i, cards] of cardsBySheet(plan).entries()) await drawFogSheet(doc, q, plan, cards, i, title)
-  doc.end()
-  await finished(out)
 }
 
 function overlaySvg(q: PrintRequest, sheet: Sheet, overlay: Overlay): string {
@@ -874,7 +877,7 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
   if (plan.sheets) {
     // Only a guide, never cut out, so it can be sharper than a low-resolution map.
     const px = Math.max(pxPerMm, FOG_PX_PER_MM)
-    const L = placementLayout(q)
+    const L = placementLayout(q, plan)
     const map = await sharp(await placementMap(q, file, L))
       .resize(Math.round(L.view.w * L.scale * px), Math.round(L.view.h * L.scale * px), { fit: 'fill' })
       .toBuffer()
@@ -901,16 +904,39 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
 }
 
 /** Bump whenever the same request should print differently, so cached files from older layouts are not served. */
-const PRINT_LAYOUT = 3
+const PRINT_LAYOUT = 4
 
 export const printKey = (q: PrintRequest, file: FileRow) => `print|${PRINT_LAYOUT}|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
 
-export async function generate(q: PrintRequest, file: FileRow, progress: (done: number) => void): Promise<string> {
-  const ext = q.output.format === 'pdf' ? '.pdf' : '.zip'
-  return cached(cachePath(printKey(q, file), ext), async (temp) => {
-    const raster = await preparedRaster(file, q.filter)
-    if (q.output.format === 'pdf') await writePdf(q, file, raster, temp, progress)
-    else await writePngZip(q, file, raster, temp, progress)
-  })
+export type PrintPart = 'overview' | 'sheets' | 'fog' | 'all'
+
+export interface PrintFile {
+  part: PrintPart
+  path: string
+  pages: number
+}
+
+/**
+ * A PDF comes as separate files for the overview, the map sheets and the fog
+ * cards, so each can be left out or printed on its own paper and settings.
+ * PNG sheets come as one zip. Each file is cached on its own.
+ */
+export async function generate(q: PrintRequest, file: FileRow, progress: (done: number) => void): Promise<PrintFile[]> {
+  const key = printKey(q, file)
+  const raster = () => preparedRaster(file, q.filter)
+  if (q.output.format === 'png') {
+    const path = await cached(cachePath(key, '.zip'), async (temp) => writePngZip(q, file, await raster(), temp, progress))
+    return [{ part: 'all', path, pages: q.pages.length }]
+  }
+  const title = `${file.name}`.replace(/\s+/g, ' ')
+  const plan = fogPlanFor(q)
+  const files: PrintFile[] = []
+  const pdf = async (part: PrintPart, pages: number, draw: (doc: PDFKit.PDFDocument) => Promise<void>) => {
+    files.push({ part, pages, path: await cached(cachePath(`${key}|${part}`, '.pdf'), (temp) => writeDoc(temp, title, draw)) })
+  }
+  if (q.marks.overview) await pdf('overview', 1, (doc) => drawOverviewPage(doc, q, file, title, plan))
+  await pdf('sheets', q.pages.length, async (doc) => drawMapSheets(doc, q, file, await raster(), title, progress))
+  if (plan.sheets) await pdf('fog', plan.sheets + (q.marks.overview ? 0 : 1), (doc) => drawFogCards(doc, q, file, plan, title))
+  return files
 }
 

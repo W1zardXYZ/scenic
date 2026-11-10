@@ -8,7 +8,7 @@ import { type FogItem, type FogPart, type FogShape, fogPlan, NEW_FOG, scaleFog }
 import type { Library, MapRecord } from '../shared/types.ts'
 import { NEUTRAL_LEVELS } from '../shared/tone.ts'
 import { AppBar } from '@/components/app-bar'
-import { GradeBadge, IconButton, Segmented } from '@/components/controls'
+import { GradeBadge, Hint, IconButton, Segmented } from '@/components/controls'
 import { Trail } from '@/components/trail'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -19,7 +19,7 @@ import { useHistory } from '@/hooks/use-history'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { announce } from './announce.ts'
-import { api, createPrint } from './api.ts'
+import { api, createPrint, type PrintFile } from './api.ts'
 import { type Index, grade, pageSpec, type Prefs } from './filters.ts'
 import { sceneScope } from './scope.ts'
 import { Canvas } from './studio/Canvas.tsx'
@@ -29,6 +29,8 @@ import type { Filter, Fog, FogCombine, FogDraw, Grid, LabeledPage, Marks, Overla
 const IN = 25.4
 
 const QUALITIES = [['high', 'Best quality'], ['balanced', 'Balanced'], ['small', 'Smallest file']] as const
+
+const PART_LABELS: Record<PrintFile['part'], string> = { overview: 'Overview', sheets: 'Map sheets', fog: 'Fog cards', all: 'PNG sheets' }
 
 export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }: {
   map: MapRecord
@@ -64,7 +66,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const [cropShare, setCropShare] = useState<Rect | null>(null)
   const [tool, setTool] = useState<Tool>('select')
   const [job, setJob] = useState<{ done: number; total: number } | null>(null)
-  const [result, setResult] = useState<{ url: string; key: string } | null>(null)
+  const [result, setResult] = useState<{ files: PrintFile[]; key: string } | null>(null)
   const [saved, setSaved] = useState(false)
   const [tab, setTab] = useState('scale')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -235,14 +237,14 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     announce('Rendering started')
     let quarters = 0
     try {
-      const url = await createPrint(request, (done, total) => {
+      const files = await createPrint(request, (done, total) => {
         setJob({ done, total })
         const reached = Math.floor((done / total) * 4)
         if (reached > quarters && reached < 4) announce(`Rendering ${reached * 25}%`)
         quarters = reached
       })
       justCreated.current = true
-      setResult({ url, key: requestKey })
+      setResult({ files, key: requestKey })
       announce(`${output.format.toUpperCase()} ready`)
     } catch (e) {
       toast.error((e as Error).message)
@@ -360,16 +362,33 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
 
   const action = ready ? (
         <>
-          <div className="flex gap-2">
-            {output.format === 'pdf' && (
-              <Button size="lg" className="flex-1" asChild>
-                <a ref={resultLink} href={ready.url} target="_blank" rel="noreferrer"><ExternalLink data-icon="inline-start" />Open PDF</a>
-              </Button>
-            )}
-            <Button size="lg" variant={output.format === 'pdf' ? 'secondary' : 'default'} className="flex-1" asChild>
-              <a ref={output.format === 'pdf' ? undefined : resultLink} href={`${ready.url}&download=1`} download><Download data-icon="inline-start" />Download</a>
+          {output.format === 'pdf' ? (
+            // One PDF per part, so the overview and fog cards can be skipped or printed on other paper.
+            <ul aria-label="PDFs" className="flex flex-col divide-y rounded-md border">
+              {ready.files.map((file, i) => (
+                <li key={file.part} className="flex items-center gap-1 py-1 pr-1 pl-3">
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    <span className="font-medium">{PART_LABELS[file.part]}</span>
+                    <span className="text-muted-foreground"> · {file.pages} {file.pages === 1 ? 'page' : 'pages'}</span>
+                  </span>
+                  <Button size="sm" variant="ghost" asChild>
+                    <a ref={i === 0 ? resultLink : undefined} href={file.url} target="_blank" rel="noreferrer" aria-label={`Open ${PART_LABELS[file.part]} PDF`}>
+                      <ExternalLink data-icon="inline-start" />Open
+                    </a>
+                  </Button>
+                  <Hint label={`Download ${PART_LABELS[file.part]}`}>
+                    <Button size="icon" variant="ghost" asChild>
+                      <a href={`${file.url}&download=1`} download aria-label={`Download ${PART_LABELS[file.part]} PDF`}><Download /></a>
+                    </Button>
+                  </Hint>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Button size="lg" className="w-full" asChild>
+              <a ref={resultLink} href={`${ready.files[0].url}&download=1`} download><Download data-icon="inline-start" />Download</a>
             </Button>
-          </div>
+          )}
           {!short && <p className="text-xs text-muted-foreground">Print at 100% / actual size, with “fit to page” off.</p>}
         </>
       ) : (

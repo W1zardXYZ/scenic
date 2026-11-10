@@ -1,5 +1,5 @@
 import polygonClipping, { type MultiPolygon, type Ring } from 'polygon-clipping'
-import { fogPieces, intersect, packSheets, type Placement, type Rect } from './layout.ts'
+import { fogPieces, intersect, packSheets, PAPERS, type Placement, type Rect } from './layout.ts'
 
 /** A point on a closed curve; its handles are relative to it, in the same units. */
 export interface CurvePoint {
@@ -36,6 +36,8 @@ export interface Fog {
   outline: boolean
   /** Prints area names on what players see: fog cards and fog on the map. Off by default so they give nothing away. */
   names?: boolean
+  /** Paper id for the fog cards, when they print on other paper than the map; none means the map's. */
+  paper?: string
 }
 
 export const NEW_FOG: Fog = { on: true, items: [], fill: '#ffffff', separate: false, outline: true, names: false }
@@ -248,7 +250,9 @@ export interface FogPlan {
  * Cuts separate covers into sheet-sized pieces and packs them onto shared sheets.
  * Covers wholly outside `crop` are left out, since nothing they would hide gets printed.
  */
-export function fogPlan(fog: Fog, sheetW: number, sheetH: number, marginMm: number, squareMm: number, crop?: Rect | null): FogPlan {
+export function fogPlan(fog: Fog, mapSheetW: number, mapSheetH: number, marginMm: number, squareMm: number, crop?: Rect | null): FogPlan {
+  const paper = PAPERS.find((p) => p.id === fog.paper)
+  const [sheetW, sheetH] = paper ? [paper.w, paper.h] : [mapSheetW, mapSheetH]
   const items = separateFog(fog).filter((item) => !crop || touches(item, crop))
   const cards = items.flatMap((item, n) => {
     const bounds = fogBounds(item)

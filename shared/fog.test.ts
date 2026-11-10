@@ -111,3 +111,12 @@ test('a label on an L-shaped cover lands on the floor, not in the notch', () => 
   assert.ok(!(x < 80 && y > 20), `in the notch at ${x},${y}`)
   assert.equal(labelRoom(ell, { x: 0, y: 50, w: 40, h: 40 }), null)
 })
+
+test('fog cards can print on other paper than the map', () => {
+  const items: FogItem[] = [{ id: 1, name: 'Cave', on: true, mode: 'cover', parts: [rect(0, 0, 150, 400)] }]
+  // Too tall for A4, so it splits; on A3 it fits whole.
+  assert.equal(fogPlan({ ...NEW_FOG, separate: true, items }, 210, 297, 6.35, 25.4).cards.length, 2)
+  const a3 = fogPlan({ ...NEW_FOG, separate: true, items, paper: 'a3' }, 210, 297, 6.35, 25.4)
+  assert.equal(a3.cards.length, 1)
+  assert.deepEqual([Math.min(a3.sheetW, a3.sheetH), Math.max(a3.sheetW, a3.sheetH)], [297, 420])
+})
