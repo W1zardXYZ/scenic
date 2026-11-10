@@ -190,6 +190,104 @@ export interface Rect {
 
 export type Segment = [x1: number, y1: number, x2: number, y2: number]
 
+/** The whole sheet of paper on the map plane: the printed area sits centred on it. */
+export function paperOf(page: Page): Rect {
+  return { x: page.x - (page.sheetW - page.w) / 2, y: page.y - (page.sheetH - page.h) / 2, w: page.sheetW, h: page.sheetH }
+}
+
+/** What a sheet really shows: its printed area cut down to the image and the crop. */
+export function contentOf(page: Rect, image: Rect, crop?: Rect | null): Rect | null {
+  const shown = intersect(page, image)
+  return shown && crop ? intersect(shown, crop) : shown
+}
+
+export type Side = 'top' | 'right' | 'bottom' | 'left'
+
+export interface Edge {
+  side: Side
+  /**
+   * Sheets join by overlapping, so each needs only two cuts: an edge facing an
+   * earlier sheet (or the outside of the map) is cut, and an edge facing a later
+   * sheet keeps its margin for that sheet's cut edge to lie on.
+   */
+  action: 'cut' | 'keep'
+  /** Index of the sheet across this edge, or -1 on the map's outer edge. */
+  neighbour: number
+  /** The join line: the cut itself, or on a kept edge the neighbour's cut, which lies inside this sheet when sheets overlap. */
+  at: number
+  /** How far the two sheets' content overlaps across this edge. */
+  overlap: number
+}
+
+export interface SheetPlan {
+  content: Rect
+  /** Top, right, bottom, left. */
+  edges: Edge[]
+}
+
+/**
+ * How much of the other axis `next` shares with `prev` if it continues it along
+ * `axis` (starts inside `prev` or right at its end), else 0.
+ */
+function follows(prev: Rect, next: Rect, axis: 'x' | 'y'): number {
+  const [p, n] = axis === 'x' ? [prev, next] : [swapRect(prev), swapRect(next)]
+  if (n.x <= p.x + EPSILON || n.x > p.x + p.w + EPSILON) return 0
+  const shared = Math.min(p.y + p.h, n.y + n.h) - Math.max(p.y, n.y)
+  return shared > EPSILON ? shared : 0
+}
+
+/** The sheet that shares the longest stretch of edge, or -1. */
+function closest(contents: (Rect | null)[], skip: number, shared: (other: Rect) => number): number {
+  let best = -1
+  let most = 0
+  contents.forEach((other, j) => {
+    const length = other && j !== skip ? shared(other) : 0
+    if (length > most + EPSILON) [best, most] = [j, length]
+  })
+  return best
+}
+
+/**
+ * Which edges of each sheet to cut and which to keep. Found from where sheets lie
+ * rather than their order, so hand-placed sheets work too. Null where a sheet
+ * shows nothing of the map.
+ */
+export function assemblyPlan(pages: Rect[], image: Rect, crop?: Rect | null): (SheetPlan | null)[] {
+  const contents = pages.map((p) => contentOf(p, image, crop))
+  return contents.map((c, i) => {
+    if (!c) return null
+    const cut = (side: 'top' | 'left', axis: 'x' | 'y'): Edge => {
+      const n = closest(contents, i, (o) => follows(o, c, axis))
+      const o = contents[n]
+      const at = axis === 'x' ? c.x : c.y
+      return { side, action: 'cut', neighbour: n, at, overlap: o ? (axis === 'x' ? o.x + o.w : o.y + o.h) - at : 0 }
+    }
+    const keep = (side: 'right' | 'bottom', axis: 'x' | 'y'): Edge => {
+      const n = closest(contents, i, (o) => follows(c, o, axis))
+      const o = contents[n]
+      const end = axis === 'x' ? c.x + c.w : c.y + c.h
+      if (!o) return { side, action: 'cut', neighbour: -1, at: end, overlap: 0 }
+      const at = axis === 'x' ? o.x : o.y
+      return { side, action: 'keep', neighbour: n, at, overlap: end - at }
+    }
+    return { content: c, edges: [cut('top', 'y'), keep('right', 'x'), keep('bottom', 'y'), cut('left', 'x')] }
+  })
+}
+
+/**
+ * An edge's line carried through the margins from just off the content's corners
+ * out to the paper's edge, never over the map. Unlike corner ticks it survives the
+ * perpendicular cut, because the kept margins always hold one end of it.
+ */
+export function edgeLines(paper: Rect, content: Rect, edge: Edge, gap = 1, shortest = 1): Segment[] {
+  const vertical = edge.side === 'left' || edge.side === 'right'
+  const [p, c] = vertical ? [swapRect(paper), swapRect(content)] : [paper, content]
+  const lines: Segment[] = []
+  if (c.x - gap - p.x >= shortest) lines.push([p.x, edge.at, c.x - gap, edge.at])
+  if (p.x + p.w - (c.x + c.w + gap) >= shortest) lines.push([c.x + c.w + gap, edge.at, p.x + p.w, edge.at])
+  return vertical ? lines.map(([a, b, d, e]): Segment => [b, a, e, d]) : lines
+}
+
 export interface HexCell {
   cx: number
   cy: number
