@@ -17,6 +17,7 @@ import { Toggle } from '@/components/ui/toggle'
 import { thumb } from '../api.ts'
 import type { Prefs } from '../filters.ts'
 import { LevelsControl } from './LevelsControl.tsx'
+import { ToneControl } from './ToneControl.tsx'
 import type { Filter, FilterMode, Fog, FogDraw, FogItem, FogPart, FogShape, Grid, Marks, Overlay, Tool } from './types.ts'
 
 const SQUARE_PRESETS = [[String(25.4), '1 inch'], ['25', '25 mm'], ['30', '30 mm'], ['32', '32 mm']] as const
@@ -315,6 +316,9 @@ export const Settings = memo(function Settings({
             {(filter.mode === 'grey' || filter.mode === 'threshold') && (
               <LevelsControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
             )}
+          </PanelGroup>
+          <PanelGroup title="Tone">
+            <ToneControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
           </PanelGroup>
           <PanelGroup title="Edges">
             <SliderField

@@ -3,7 +3,7 @@ import { CloudFog, Crop, Hand, Lasso, Magnet, Maximize, MousePointer2, Pentagon,
 import { fadeMask, fadeRegion } from '../../shared/fade.ts'
 import { curveFromStroke, type CurvePoint, type Fog, fogBounds, type FogPart, type FogShape, fogPath, inkOn, liveFog, nearestOnCurve, partBounds, partPath, sharpCurve, splitCurve, withoutPart } from '../../shared/fog.ts'
 import { gridSegments, hexNumbers, type Page, type PageSpec, type Plane, type Rect } from '../../shared/layout.ts'
-import { toneCurve } from '../../shared/tone.ts'
+import { isPlain, printTable } from '../../shared/tone.ts'
 import type { MapRecord } from '../../shared/types.ts'
 import { Hint, IconButton, IconToggle } from '@/components/controls'
 import { Button } from '@/components/ui/button'
@@ -14,6 +14,7 @@ import { announce } from '../announce.ts'
 import { thumb } from '../api.ts'
 import { lassoTouches, type Point, rectsTouch } from './hit.ts'
 import type { Filter, FogCombine, FogDraw, Grid, LabeledPage, Overlay, Tool } from './types.ts'
+import { usePreparedImage } from './use-prepared-image.ts'
 
 const SNAP_PX = 10
 const TOOLBAR_PX = 64
@@ -122,30 +123,26 @@ const Art = memo(function Art({ map, plane, gridType, sq, overlay, filter }: {
     () => (showGridGuide && gridType === 'hex' && overlay.numbering ? hexNumbers({ x: 0, y: 0, w: plane.w, h: plane.h }, sq, plane.offsetX, plane.offsetY) : []),
     [showGridGuide, gridType, overlay.numbering, plane, sq],
   )
-  const toned = filter.mode === 'grey' || filter.mode === 'threshold'
-  const table = useMemo(() => Array.from(toneCurve(filter.levels), (v) => (v / 255).toFixed(4)).join(' '), [filter.levels])
+  const grey = filter.mode === 'grey' || filter.mode === 'threshold'
+  // Browsers cut the looked-up value down to 8 bits rather than rounding it; a quarter step up lands each on its own value.
+  const table = useMemo(() => Array.from(printTable(filter), (v) => Math.min(1, (v + 0.25) / 255).toFixed(5)).join(' '), [filter])
+  const href = usePreparedImage(thumb(map, 'large'), filter)
 
   return (
     <>
       <defs>
+        {/* The same table the renderer applies; with 256 entries each value has its own entry. */}
         <filter id="tone" colorInterpolationFilters="sRGB">
-          <feColorMatrix type="saturate" values="0" />
+          {/* Already grey once the prepared image is in; until then it stands in for it. */}
+          {grey && <feColorMatrix type="saturate" values="0" />}
           <feComponentTransfer>
             <feFuncR type="table" tableValues={table} />
             <feFuncG type="table" tableValues={table} />
             <feFuncB type="table" tableValues={table} />
           </feComponentTransfer>
-          {filter.mode === 'threshold' && (
-            <feComponentTransfer>
-              <feFuncR type="linear" slope="255" intercept={-255 * filter.amount} />
-              <feFuncG type="linear" slope="255" intercept={-255 * filter.amount} />
-              <feFuncB type="linear" slope="255" intercept={-255 * filter.amount} />
-            </feComponentTransfer>
-          )}
         </filter>
       </defs>
-      <image href={thumb(map, 'large')} x={0} y={0} width={plane.w} height={plane.h} preserveAspectRatio="none" style={{ filter: toned ? 'url(#tone)' : undefined }} />
-      {filter.mode === 'light' && <rect x={0} y={0} width={plane.w} height={plane.h} fill="#fff" opacity={filter.amount} />}
+      <image href={href} x={0} y={0} width={plane.w} height={plane.h} preserveAspectRatio="none" style={{ filter: isPlain(filter) ? undefined : 'url(#tone)' }} />
       {overlayPath && (
         <path d={overlayPath} fill="none" stroke={overlay.color} strokeOpacity={overlay.opacity} strokeWidth={overlay.widthMm} vectorEffect="non-scaling-stroke" />
       )}

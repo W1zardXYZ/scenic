@@ -13,7 +13,7 @@ import {
   touches,
 } from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
-import { isNeutral, type Levels, toneCurve } from '../shared/tone.ts'
+import { type Filter, filterPixels, HUES, isPlain, MAX_BANDS, MAX_CURVE_POINTS } from '../shared/tone.ts'
 import { PIXEL_LIMIT } from './analyze.ts'
 import type { FileRow } from './db.ts'
 import { safeName } from './export.ts'
@@ -39,7 +39,7 @@ export interface PrintRequest {
   grid: { type: GridType; cols: number; rows: number; offsetX: number; offsetY: number }
   overlay: { show: boolean; color: string; opacity: number; widthMm: number; numbering: boolean }
   pages: LabeledPage[]
-  filter: { mode: 'color' | 'grey' | 'light' | 'threshold'; amount: number; levels: Levels }
+  filter: Filter
   marks: { cut: boolean; labels: boolean; overview: boolean }
   fog: Fog
   /** Prints only this part of the map, in mm on the map plane. */
@@ -56,6 +56,10 @@ const isCurve = (points: FogPart['points']) => Array.isArray(points) && points.l
 const isFogItem = (item: FogItem) => typeof item?.name === 'string' && item.name.length <= 60 && typeof item.on === 'boolean' &&
   ['cover', 'show'].includes(item.mode) && Array.isArray(item.parts) && item.parts.length >= 1 && item.parts.length <= 100 &&
   item.parts.every((part) => typeof part?.subtract === 'boolean' && (part.box ? isRect(part.box) : isCurve(part.points)))
+
+const isToneCurve = (curve: Filter['curve']) => Array.isArray(curve) && curve.length >= 2 && curve.length <= MAX_CURVE_POINTS &&
+  curve.every((p, i) => Array.isArray(p) && p.length === 2 && finite(p[0], 0, 255) && finite(p[1], 0, 255) && (i === 0 || p[0] > curve[i - 1][0]))
+const isBand = (b: Filter['bands'][number]) => [b?.from, b?.to, b?.soft].every((v) => finite(v, 0, 255)) && b.from <= b.to && finite(b.amount, -1, 1)
 
 const MAX_FOG_CARDS = 1000
 
@@ -88,6 +92,9 @@ export function validatePrint(q: PrintRequest): string | null {
   if (!q.filter || !['color', 'grey', 'light', 'threshold'].includes(q.filter.mode) || !finite(q.filter.amount, 0, 1)) return 'filter'
   const { black, white, gamma } = q.filter.levels ?? {}
   if (!finite(black, 0, 254) || !finite(white, 1, 255) || black >= white || !finite(gamma, 0.1, 10)) return 'levels'
+  if (!isToneCurve(q.filter.curve)) return 'curve'
+  if (!Array.isArray(q.filter.bands) || q.filter.bands.length > MAX_BANDS || !q.filter.bands.every(isBand)) return 'bands'
+  if (!Array.isArray(q.filter.hues) || q.filter.hues.length !== HUES.length || !q.filter.hues.every((h) => finite(h, -1, 1))) return 'hues'
   if (!q.marks) return 'marks'
   if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill) ||
     !['undefined', 'boolean'].includes(typeof q.fog.names) || (q.fog.paper !== undefined && !PAPERS.some((p) => p.id === q.fog.paper))) return 'fog'
@@ -108,17 +115,10 @@ function preparedRaster(file: FileRow, filter: PrintRequest['filter']): Promise<
     const image = sharp(await localImage(file), { limitInputPixels: PIXEL_LIMIT })
       .flatten({ background: '#ffffff' })
       .toColourspace('srgb')
-    if (filter.mode === 'light') image.linear(1 - filter.amount, 255 * filter.amount)
-    if (filter.mode === 'grey' || filter.mode === 'threshold') {
-      const { data, info } = await image.greyscale().raw().toBuffer({ resolveWithObject: true })
-      const raw = { width: info.width, height: info.height, channels: 1 as const }
-      if (!isNeutral(filter.levels)) {
-        const curve = toneCurve(filter.levels)
-        for (let i = 0; i < data.length; i++) data[i] = curve[data[i]]
-      }
-      const toned = sharp(data, { raw })
-      if (filter.mode === 'threshold') toned.threshold(Math.round(filter.amount * 255), { greyscale: true })
-      await toned.toFile(temp)
+    if (!isPlain(filter)) {
+      const { data: rgb, info } = await image.removeAlpha().raw().toBuffer({ resolveWithObject: true })
+      const { data, channels } = filterPixels(rgb, filter)
+      await sharp(data, { raw: { width: info.width, height: info.height, channels } }).toFile(temp)
       return
     }
     await image.toFile(temp)
@@ -927,7 +927,7 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
 }
 
 /** Bump whenever the same request should print differently, so cached files from older layouts are not served. */
-const PRINT_LAYOUT = 5
+const PRINT_LAYOUT = 6
 
 export const printKey = (q: PrintRequest, file: FileRow) => `print|${PRINT_LAYOUT}|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
 

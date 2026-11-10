@@ -6,7 +6,7 @@ import {
 } from '../shared/layout.ts'
 import { type FogItem, type FogPart, type FogShape, fogPlan, NEW_FOG, scaleFog } from '../shared/fog.ts'
 import type { Library, MapRecord } from '../shared/types.ts'
-import { NEUTRAL_LEVELS } from '../shared/tone.ts'
+import { NEW_FILTER } from '../shared/tone.ts'
 import { AppBar } from '@/components/app-bar'
 import { GradeBadge, Hint, IconButton, Segmented } from '@/components/controls'
 import { Trail } from '@/components/trail'
@@ -49,7 +49,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const [grid, setGrid] = useState<Grid>(measured)
   const [lockAspect, setLockAspect] = useState(true)
   const [overlay, setOverlay] = useState<Overlay>({ show: !map.hasGrid, color: '#000000', opacity: 0.35, widthMm: 0.2, numbering: false })
-  const [filter, setFilter] = useState<Filter>({ mode: 'color', amount: 0.3, levels: NEUTRAL_LEVELS })
+  const [filter, setFilter] = useState<Filter>(NEW_FILTER)
   const [marks, setMarks] = useState<Marks>({ cut: true, labels: true, overview: true })
   const [fadeMm, setFadeMm] = useState(0)
   // Kept as a share of the map, so fog stays on the same spot when the scale changes.
