@@ -69,7 +69,8 @@ export function validatePrint(q: PrintRequest): string | null {
   const { black, white, gamma } = q.filter.levels ?? {}
   if (!finite(black, 0, 254) || !finite(white, 1, 255) || black >= white || !finite(gamma, 0.1, 10)) return 'levels'
   if (!q.marks) return 'marks'
-  if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill)) return 'fog'
+  if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill) ||
+    !['undefined', 'boolean'].includes(typeof q.fog.names)) return 'fog'
   if (q.crop && !isRect(q.crop)) return 'crop'
   if (q.fadeMm !== undefined && !finite(q.fadeMm, 0, 200)) return 'fade'
   if (!q.output || !['pdf', 'png'].includes(q.output.format) || !(q.output.quality in MAX_PPI)) return 'output'
@@ -334,7 +335,7 @@ function bakedSvg(q: PrintRequest, region: Rect): string | null {
   const { x, y, w, h } = region
   const box = `x="${x}" y="${y}" width="${w}" height="${h}"`
   const shapes = (list: FogItem[], fill: string) => list.map((i) => `<path d="${fogPath(i)}" fill="${fill}"/>`).join('')
-  const names = covers.filter((i) => i.name.trim()).map((i) => {
+  const names = covers.filter((i) => q.fog.names && i.name.trim()).map((i) => {
     const b = fogBounds(i)
     const room = labelRoom(i, b) ?? b
     const text = i.name.trim()
@@ -349,18 +350,20 @@ function bakedSvg(q: PrintRequest, region: Rect): string | null {
 }
 
 /** The mark is what gets matched against the placement page, so it leads; the name confirms it. */
+/** A card's ID, small along the bottom of the shape so it reads on the table without drawing the eye; its name only when asked for. */
 function cardLabels(q: PrintRequest, card: FogCard): Label[] {
-  // Centred on the shape within this piece: a label off the shape would be cut away with the paper.
+  // Inside the shape within this piece: a label off the shape would be cut away with the paper.
   const box = labelRoom(card.item, card.region) ?? card.region
   const color = labelTone(q.fog.fill)
-  const name = card.item.name.trim()
-  const room = box.w * 0.8
-  const s = Math.min(6, box.h * 0.2, fitted(card.id, Infinity, room / 1.4, 'bold'), name ? fitted(name, Infinity, room) : Infinity)
-  const [idCap, gap, nameCap] = [capHeight(s * 1.4, 'bold'), s * 0.6, name ? capHeight(s) : 0]
-  const top = box.y + (box.h - idCap - (name ? gap + nameCap : 0)) / 2
+  const name = q.fog.names ? card.item.name.trim() : ''
+  const room = box.w * 0.9
+  const idSize = Math.min(3, box.h * 0.12, fitted(card.id, Infinity, room, 'bold'))
+  const nameSize = name ? Math.min(idSize, fitted(name, Infinity, room)) : 0
   const x = box.x + box.w / 2
-  const labels: Label[] = [{ text: card.id, x, y: top + idCap / 2, size: s * 1.4, weight: 'bold', color }]
-  if (name) labels.push({ text: name, x, y: top + idCap + gap + nameCap / 2, size: s, weight: 'regular', color })
+  const bottom = box.y + box.h - Math.min(3, box.h * 0.08)
+  const idY = bottom - capHeight(idSize, 'bold') / 2
+  const labels: Label[] = [{ text: card.id, x, y: idY, size: idSize, weight: 'bold', color }]
+  if (name) labels.push({ text: name, x, y: idY - capHeight(idSize, 'bold') / 2 - nameSize * 0.5 - capHeight(nameSize) / 2, size: nameSize, weight: 'regular', color })
   return labels
 }
 
@@ -483,18 +486,23 @@ function placementLabels(plan: FogPlan, L: PlacementLayout): Label[] {
 function coverMarks(plan: FogPlan, L: MapPlacement, size: number): Label[] {
   const labels: Label[] = []
   const items = [...new Set(plan.cards.map((c) => c.item))]
+  // The overview is the GM's key, so it always names each area; a split cover names it on its first piece.
   const marks = items.flatMap((item) => {
     const pieces = plan.cards.filter((c) => c.item === item)
+    const name = item.name.trim()
     return pieces.length > 1
-      ? pieces.map((c) => ({ text: c.id, box: labelRoom(item, c.region) }))
-      : [{ text: pieces[0].mark, box: labelRoom(item, fogBounds(item)) }]
+      ? pieces.map((c, i) => ({ text: c.id, name: i ? '' : name, box: labelRoom(item, c.region) }))
+      : [{ text: pieces[0].mark, name, box: labelRoom(item, fogBounds(item)) }]
   })
-  for (const { text, box } of marks) {
+  for (const { text, name, box } of marks) {
     const seen = box && intersect(box, L.view)
     if (!seen) continue
     const x = L.x + (seen.x + seen.w / 2 - L.view.x) * L.scale
     const y = L.y + (seen.y + seen.h / 2 - L.view.y) * L.scale
-    labels.push({ text, x, y, size, weight: 'bold', color: '#111111', halo: '#ffffff' })
+    const nameSize = name ? Math.max(1.6, fitted(name, size * 0.62, seen.w * L.scale * 0.92)) : 0
+    const shift = name ? (capHeight(size, 'bold') * 0.5 + capHeight(nameSize) * 0.5 + size * 0.25) / 2 : 0
+    labels.push({ text, x, y: y - shift, size, weight: 'bold', color: '#111111', halo: '#ffffff' })
+    if (name) labels.push({ text: name, x, y: y + shift, size: nameSize, weight: 'regular', color: '#111111', halo: '#ffffff' })
   }
   return labels
 }
@@ -893,7 +901,7 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
 }
 
 /** Bump whenever the same request should print differently, so cached files from older layouts are not served. */
-const PRINT_LAYOUT = 2
+const PRINT_LAYOUT = 3
 
 export const printKey = (q: PrintRequest, file: FileRow) => `print|${PRINT_LAYOUT}|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
 

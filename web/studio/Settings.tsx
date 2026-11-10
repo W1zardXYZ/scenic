@@ -373,6 +373,12 @@ export const Settings = memo(function Settings({
                     onCheckedChange={(separate) => setFog({ ...fog, separate })}
                   />
                   {!fog.separate && <SwitchRow label="Outline on the map" checked={fog.outline} onCheckedChange={(outline) => setFog({ ...fog, outline })} />}
+                  <SwitchRow
+                    label="Print area names"
+                    hint={fog.names ? 'Players will see them' : fog.separate ? 'Hidden from players. The overview still lists them' : 'Hidden from players'}
+                    checked={!!fog.names}
+                    onCheckedChange={(names) => setFog({ ...fog, names })}
+                  />
                 </>
               )}
             </div>

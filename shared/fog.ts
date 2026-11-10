@@ -34,9 +34,11 @@ export interface Fog {
   separate: boolean
   /** Draws cover edges on the map sheets; separate sheets always have them, for cutting. */
   outline: boolean
+  /** Prints area names on what players see: fog cards and fog on the map. Off by default so they give nothing away. */
+  names?: boolean
 }
 
-export const NEW_FOG: Fog = { on: true, items: [], fill: '#ffffff', separate: false, outline: true }
+export const NEW_FOG: Fog = { on: true, items: [], fill: '#ffffff', separate: false, outline: true, names: false }
 
 export const liveFog = (fog: Fog) => (fog.on ? fog.items.filter((item) => item.on && fogPath(item)) : [])
 
