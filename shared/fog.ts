@@ -1,5 +1,5 @@
 import polygonClipping, { type MultiPolygon, type Ring } from 'polygon-clipping'
-import { intersect, type Rect } from './layout.ts'
+import { fogPieces, intersect, packSheets, type Placement, type Rect } from './layout.ts'
 
 /** A point on a closed curve; its handles are relative to it, in the same units. */
 export interface CurvePoint {
@@ -158,6 +158,112 @@ export const fogBounds = (item: FogItem) => regionOf(item).bounds
 
 export const touches = (item: FogItem, area: Rect) => !!intersect(fogBounds(item), area)
 
+const boxRing = ({ x, y, w, h }: Rect): Ring => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+
+/** The stretch of inside along a line (`across` on the other axis) that contains `at`, or null if `at` is outside. */
+function span(rings: Ring[], at: number, across: number, vertical: boolean): [number, number] | null {
+  const hits: number[] = []
+  for (const ring of rings) {
+    ring.forEach((a, i) => {
+      const b = ring[(i + 1) % ring.length]
+      const [a0, a1, b0, b1] = vertical ? [a[1], a[0], b[1], b[0]] : [a[0], a[1], b[0], b[1]]
+      if (a1 > across !== b1 > across) hits.push(a0 + ((across - a1) / (b1 - a1)) * (b0 - a0))
+    })
+  }
+  hits.sort((p, q) => p - q)
+  for (let i = 0; i + 1 < hits.length; i += 2) if (hits[i] <= at && at <= hits[i + 1]) return [hits[i], hits[i + 1]]
+  return null
+}
+
+function edgeDistance(rings: Ring[], x: number, y: number): number {
+  let least = Infinity
+  for (const ring of rings) {
+    ring.forEach(([ax, ay], i) => {
+      const [bx, by] = ring[(i + 1) % ring.length]
+      const length = (bx - ax) ** 2 + (by - ay) ** 2
+      const t = length ? Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / length)) : 0
+      least = Math.min(least, Math.hypot(x - ax - t * (bx - ax), y - ay - t * (by - ay)))
+    })
+  }
+  return least
+}
+
+const SPOT_STEPS = 24
+
+/**
+ * Clear room for a label on the part of the fog inside `area`, centred where the label should go.
+ * Starts from the point deepest inside, so an L-shaped room gets its label on the floor rather than in the notch.
+ */
+export function labelRoom(item: FogItem, area: Rect): Rect | null {
+  let rings: Ring[]
+  try {
+    rings = polygonClipping.intersection(combine(item.parts), [[boxRing(area)]]).flat()
+  } catch {
+    const box = intersect(fogBounds(item), area)
+    rings = box ? [boxRing(box)] : []
+  }
+  if (!rings.length) return null
+  const xs = rings.flat().map((p) => p[0])
+  const ys = rings.flat().map((p) => p[1])
+  const b = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
+  let best = { x: b.x + b.w / 2, y: b.y + b.h / 2, depth: -1 }
+  for (let i = 0; i < SPOT_STEPS; i++) {
+    for (let j = 0; j < SPOT_STEPS; j++) {
+      const [x, y] = [b.x + ((i + 0.5) * b.w) / SPOT_STEPS, b.y + ((j + 0.5) * b.h) / SPOT_STEPS]
+      if (!span(rings, x, y, false)) continue
+      const depth = edgeDistance(rings, x, y)
+      if (depth > best.depth + 1e-6) best = { x, y, depth }
+    }
+  }
+  const [left, right] = span(rings, best.x, best.y, false) ?? [b.x, b.x + b.w]
+  const [top, bottom] = span(rings, best.y, (left + right) / 2, true) ?? [b.y, b.y + b.h]
+  return { x: left, y: top, w: right - left, h: bottom - top }
+}
+
+/** One cut-out card: a whole cover, or one sheet-sized piece of a big one. */
+export interface FogCard {
+  item: FogItem
+  /** The cover's mark on the placement page: F1, F2, … in item order. */
+  mark: string
+  /** What the card calls itself: the mark, plus which piece for a split cover (F3·1/2). */
+  id: string
+  /** The part of the map this card covers, in mm. */
+  region: Rect
+  /** Whether a glue tab runs along this edge for the next piece to sit on. */
+  tabRight: boolean
+  tabBottom: boolean
+  placement: Placement
+}
+
+export interface FogPlan {
+  sheetW: number
+  sheetH: number
+  sheets: number
+  cards: FogCard[]
+}
+
+/**
+ * Cuts separate covers into sheet-sized pieces and packs them onto shared sheets.
+ * Covers wholly outside `crop` are left out, since nothing they would hide gets printed.
+ */
+export function fogPlan(fog: Fog, sheetW: number, sheetH: number, marginMm: number, squareMm: number, crop?: Rect | null): FogPlan {
+  const items = separateFog(fog).filter((item) => !crop || touches(item, crop))
+  const cards = items.flatMap((item, n) => {
+    const bounds = fogBounds(item)
+    const pieces = fogPieces(bounds, sheetW, sheetH, marginMm, squareMm)
+    return pieces.map(({ page, tabRight, tabBottom }, i) => ({
+      item,
+      mark: `F${n + 1}`,
+      id: pieces.length > 1 ? `F${n + 1}·${i + 1}/${pieces.length}` : `F${n + 1}`,
+      region: { x: bounds.x + page.x, y: bounds.y + page.y, w: page.w, h: page.h },
+      tabRight,
+      tabBottom,
+    }))
+  })
+  const packing = packSheets(cards.map((c) => c.region), sheetW, sheetH, marginMm)
+  return { ...packing, cards: cards.map((card, i) => ({ ...card, placement: packing.placements[i] })) }
+}
+
 type Point = { x: number; y: number }
 
 /** Ramer-Douglas-Peucker: keeps the points that actually shape a hand-drawn line. */
@@ -234,6 +340,13 @@ export function splitCurve(points: CurvePoint[], index: number, t: number): Curv
   copy[next] = { ...b, inX: q2.x - b.x, inY: q2.y - b.y }
   copy.splice(index + 1, 0, added)
   return copy
+}
+
+/** Names on fog: the fill moved a little toward its ink, legible up close without showing through or drawing the eye. */
+export function labelTone(fill: string): string {
+  const ink = inkOn(fill)
+  const channel = (i: number) => Math.round(parseInt(fill.slice(i, i + 2), 16) * 0.7 + parseInt(ink.slice(i, i + 2), 16) * 0.3)
+  return `#${[1, 3, 5].map((i) => channel(i).toString(16).padStart(2, '0')).join('')}`
 }
 
 /** Black or white, whichever reads on the colour. */

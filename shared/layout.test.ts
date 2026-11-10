@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PAPERS, generatePages, generatePagesIn, gridCandidates, sheetCount, pageLabel, columnsOf, intersect, gridSegments,
-  type PageSpec, type Plane,
+  PAPERS, PACK_GUTTER_MM, fogPieces, generatePages, generatePagesIn, gridCandidates, sheetCount, pageLabel, columnsOf, intersect, gridSegments, packSheets,
+  type Packing, type PageSpec, type Placement, type Plane,
 } from './layout.ts'
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`)
@@ -250,4 +250,67 @@ test('gridCandidates puts sizes that divide the map evenly first', () => {
   const [best] = gridCandidates(7000, 7000)
   assert.equal(best.pps, 140)
   assert.equal(best.cols, 50)
+})
+
+const footprintOf = (s: { w: number; h: number }, p: Placement) => ({ x: p.x, y: p.y, w: p.rotated ? s.h : s.w, h: p.rotated ? s.w : s.h })
+
+/** Every piece on the printable area, and a gutter's width clear of every other piece on its sheet. */
+function assertPacked(sizes: { w: number; h: number }[], packing: Packing, marginMm: number) {
+  const [width, height] = [packing.sheetW - marginMm * 2, packing.sheetH - marginMm * 2]
+  assert.equal(packing.placements.length, sizes.length)
+  const boxes = packing.placements.map((p, i) => ({ sheet: p.sheet, ...footprintOf(sizes[i], p) }))
+  for (const b of boxes) {
+    assert.ok(b.sheet >= 0 && b.sheet < packing.sheets)
+    assert.ok(b.x >= -1e-6 && b.y >= -1e-6 && b.x + b.w <= width + 1e-6 && b.y + b.h <= height + 1e-6, `off the sheet: ${JSON.stringify(b)}`)
+  }
+  for (const [i, a] of boxes.entries()) {
+    for (const b of boxes.slice(i + 1)) {
+      if (a.sheet !== b.sheet) continue
+      const grown = { x: a.x - PACK_GUTTER_MM + 0.01, y: a.y - PACK_GUTTER_MM + 0.01, w: a.w + PACK_GUTTER_MM * 2 - 0.02, h: a.h + PACK_GUTTER_MM * 2 - 0.02 }
+      assert.equal(intersect(grown, b), null, `too close: ${JSON.stringify(a)} ${JSON.stringify(b)}`)
+    }
+  }
+}
+
+test('packing puts many small pieces on one sheet, clear of each other', () => {
+  const sizes = Array.from({ length: 12 }, (_, i) => ({ w: 40 + (i % 3) * 10, h: 50 + (i % 4) * 5 }))
+  const packing = packSheets(sizes, 210, 297, 6.35)
+  assertPacked(sizes, packing, 6.35)
+  assert.equal(packing.sheets, 1)
+})
+
+test('packing turns a piece that only fits sideways', () => {
+  const sizes = [{ w: 280, h: 100 }, { w: 100, h: 280 }]
+  const packing = packSheets(sizes, 210, 297, 0)
+  assertPacked(sizes, packing, 0)
+  assert.equal(packing.sheets, 1)
+  assert.equal(packing.sheetW, 210)
+  assert.deepEqual(packing.placements.map((p) => p.rotated).sort(), [false, true])
+})
+
+test('packing a realistic set of fog pieces beats a sheet per piece', () => {
+  const sq = 25.4
+  const sizes = [[4, 4], [4, 3], [5, 5], [5, 4], [8, 7.8], [8, 6.5], [4, 6], [8, 2], [3, 7], [4, 5], [8, 6.5], [6, 4]]
+    .map(([w, h]) => ({ w: Math.min(w * sq, 197.3), h: Math.min(h * sq, 284.3) }))
+  const packing = packSheets(sizes, 210, 297, 6.35)
+  assertPacked(sizes, packing, 6.35)
+  assert.ok(packing.sheets <= 5, `${packing.sheets} sheets`)
+})
+
+test('packing is deterministic and keeps input order', () => {
+  const sizes = [{ w: 120, h: 80 }, { w: 30, h: 30 }, { w: 120, h: 80 }, { w: 190, h: 60 }, { w: 30, h: 30 }]
+  const first = packSheets(sizes, 210, 297, 5)
+  assert.deepEqual(packSheets(sizes, 210, 297, 5), first)
+  assertPacked(sizes, first, 5)
+})
+
+test('packing nothing needs no sheets', () => {
+  assert.equal(packSheets([], 210, 297, 5).sheets, 0)
+})
+
+test('fog pieces never exceed the printable area, so packing never overflows', () => {
+  const pieces = fogPieces({ x: 0, y: 0, w: 203.2, h: 355.6 }, 210, 297, 6.35, 25.4)
+  assert.equal(pieces.length, 2)
+  const sizes = pieces.map((p) => ({ w: p.page.w, h: p.page.h }))
+  assertPacked(sizes, packSheets(sizes, 210, 297, 6.35), 6.35)
 })
