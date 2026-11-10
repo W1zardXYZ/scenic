@@ -4,7 +4,8 @@ import PDFDocument from 'pdfkit'
 import sharp from 'sharp'
 import yazl from 'yazl'
 import {
-  FOG_TAB_MM, fogPieces, gridSegments, hexNumbers, intersect, type Page, type Rect, type Segment,
+  assemblyPlan, type Edge, edgeLines, FOG_TAB_MM, fogPieces, gridSegments, hexNumbers, intersect, type Page, paperOf, type Rect,
+  type Segment, type Side,
 } from '../shared/layout.ts'
 import { bakedFog, type Fog, type FogItem, type FogPart, fogBounds, fogPath, inkOn, separateFog, touches } from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
@@ -154,13 +155,56 @@ async function* tiles<T, R>(items: T[], render: (item: T) => Promise<R>): AsyncG
   while (running.length) yield await running.shift()!
 }
 
+/** A line of text in a margin, centred on (x, y) or starting there, turned by `angle` degrees. */
+interface Note {
+  x: number
+  y: number
+  angle: number
+  anchor: 'start' | 'middle'
+  text: string
+}
+
 interface Overlay {
   /** Where the grid may draw, relative to the printed area. */
   clip: Rect
   grid: Segment[]
   numbers: { x: number; y: number; text: string }[]
-  marks: Segment[]
-  label: string
+  /** Solid hairlines to trim along. */
+  cuts: Segment[]
+  /** Dashed hairlines on kept edges, where the next sheet's cut edge goes. */
+  joins: Segment[]
+  notes: Note[]
+}
+
+const MARK_INK = '#808080'
+const MARK_MM = 0.15
+const MARK_DASH = [1.2, 0.8]
+const NOTE_PT = 6
+const NOTE_MM = (NOTE_PT * 25.4) / 72
+/** Roughly Helvetica's average advance, to fit notes the same way in the PDF and the PNG. */
+const fitText = (text: string, mm: number) => {
+  const room = Math.floor(mm / (NOTE_MM * 0.55))
+  return text.length <= room ? text : room > 3 ? `${text.slice(0, room - 1).trimEnd()}…` : ''
+}
+
+const imageRect = (q: PrintRequest): Rect => ({ x: 0, y: 0, w: q.grid.cols * q.squareMm, h: q.grid.rows * q.squareMm })
+
+/** Worked out once per request, since each sheet's plan depends on all the others. */
+const plans = new WeakMap<PrintRequest, ReturnType<typeof assemblyPlan>>()
+const planFor = (q: PrintRequest) => {
+  if (!plans.has(q)) plans.set(q, assemblyPlan(q.pages, imageRect(q), q.crop))
+  return plans.get(q)!
+}
+const planOf = (q: PrintRequest, page: Page) => planFor(q)[q.pages.indexOf(page as LabeledPage)] ?? null
+
+/** What each margin says: cut or keep, and which sheet lies across it. */
+function edgeNote(q: PrintRequest, edge: Edge): string {
+  const other = q.pages[edge.neighbour]?.label
+  const overlap = edge.overlap > 0.5 ? `${Math.round(edge.overlap)} mm overlap` : ''
+  if (edge.action === 'keep') {
+    return `KEEP  ·  ${other} goes on top${overlap ? `, edge on dashed line (${overlap})` : ''}`
+  }
+  return other ? `CUT  ·  lay over ${other}${overlap ? ` (${overlap})` : ''}` : 'CUT  ·  map edge'
 }
 
 function overlayFor(q: PrintRequest, file: FileRow, sheet: Sheet): Overlay {
@@ -168,26 +212,49 @@ function overlayFor(q: PrintRequest, file: FileRow, sheet: Sheet): Overlay {
   const offsetX = (q.grid.offsetX / (file.width / q.grid.cols)) * q.squareMm
   const offsetY = (q.grid.offsetY / (file.height / q.grid.rows)) * q.squareMm
   const shift = ([a, b, c, d]: Segment): Segment => [a - page.x, b - page.y, c - page.x, d - page.y]
-  const area = q.crop ? intersect(page, q.crop) : page
+  const plan = planOf(q, page)
+  // The grid stops where the map does, leaving the margins to the marks.
+  const area = plan?.content ?? null
   const grid = q.overlay.show && area ? gridSegments(q.grid.type, area, q.squareMm, offsetX, offsetY).map(shift) : []
   const clip = area ? { ...area, x: area.x - page.x, y: area.y - page.y } : { x: 0, y: 0, w: 0, h: 0 }
   const numbers = q.overlay.show && q.grid.type === 'hex' && q.overlay.numbering
     ? hexNumbers(page, q.squareMm, offsetX, offsetY).map((n) => ({ ...n, x: n.x - page.x, y: n.y - page.y }))
     : []
 
-  const marks: Segment[] = []
-  const reach = Math.min(4, Math.min(sheet.left, sheet.top) - 1)
-  if (q.marks.cut && reach > 0.5) {
-    const gap = 0.5
-    for (const x of [0, page.w]) {
-      const out = x ? 1 : -1
-      for (const y of [0, page.h]) {
-        const down = y ? 1 : -1
-        marks.push([x + out * gap, y, x + out * (gap + reach), y], [x, y + down * gap, x, y + down * (gap + reach)])
-      }
-    }
+  const cuts: Segment[] = []
+  const joins: Segment[] = []
+  const notes: Note[] = []
+  if (!plan) return { clip, grid, numbers, cuts, joins, notes }
+  const paper = paperOf(page)
+  const c = plan.content
+  if (q.marks.cut) {
+    for (const edge of plan.edges) (edge.action === 'cut' ? cuts : joins).push(...edgeLines(paper, c, edge).map(shift))
   }
-  return { clip, grid, numbers, marks, label: page.label }
+  if (q.marks.labels) {
+    // Notes sit just outside the content, inside the part of the margin a printer reaches.
+    const room = { top: c.y - paper.y, bottom: paper.y + paper.h - c.y - c.h, left: c.x - paper.x, right: paper.x + paper.w - c.x - c.w }
+    const away = (side: Side) => Math.min(3, room[side] / 2)
+    const fits = (side: Side) => room[side] >= NOTE_MM + 1
+    const cx = c.x + c.w / 2 - page.x
+    const cy = c.y + c.h / 2 - page.y
+    const title = `${page.label}   ${file.name.replace(/\s+/g, ' ')}`
+    const labelW = Math.min(50, c.w * 0.25)
+    for (const edge of plan.edges) {
+      if (!fits(edge.side)) continue
+      const along = edge.side === 'top' || edge.side === 'bottom' ? c.w - (edge.side === 'bottom' ? labelW * 2 + 6 : 4) : c.h - 4
+      const text = fitText(edgeNote(q, edge), along)
+      if (!text) continue
+      const d = away(edge.side)
+      if (edge.side === 'top') notes.push({ x: cx, y: c.y - d - page.y, angle: 0, anchor: 'middle', text })
+      if (edge.side === 'bottom') notes.push({ x: cx, y: c.y + c.h + d - page.y, angle: 0, anchor: 'middle', text })
+      if (edge.side === 'left') notes.push({ x: c.x - d - page.x, y: cy, angle: -90, anchor: 'middle', text })
+      if (edge.side === 'right') notes.push({ x: c.x + c.w + d - page.x, y: cy, angle: 90, anchor: 'middle', text })
+    }
+    // Clear of the left edge's line, which runs down through this margin.
+    const label = fitText(title, labelW)
+    if (fits('bottom') && label) notes.push({ x: c.x + 1.5 - page.x, y: c.y + c.h + away('bottom') - page.y, angle: 0, anchor: 'start', text: label })
+  }
+  return { clip, grid, numbers, cuts, joins, notes }
 }
 
 function fogSheets(q: PrintRequest) {
@@ -285,8 +352,9 @@ const stroke = (doc: PDFKit.PDFDocument, segments: Segment[]) => {
   doc.stroke()
 }
 
-function drawPdfOverlay(doc: PDFKit.PDFDocument, q: PrintRequest, sheet: Sheet, overlay: Overlay, title: string) {
-  const { page, left, top } = sheet
+/** `_title` is unused: overlayFor names the sheet itself, so the PNG export says the same. */
+function drawPdfOverlay(doc: PDFKit.PDFDocument, q: PrintRequest, sheet: Sheet, overlay: Overlay, _title: string) {
+  const { left, top } = sheet
   const origin = () => doc.translate(left * MM, top * MM)
   if (overlay.grid.length) {
     doc.save()
@@ -302,66 +370,155 @@ function drawPdfOverlay(doc: PDFKit.PDFDocument, q: PrintRequest, sheet: Sheet, 
     }
     doc.restore()
   }
-  if (overlay.marks.length) {
+  if (overlay.cuts.length || overlay.joins.length) {
     doc.save()
     origin()
-    doc.strokeColor('#000000').lineWidth(0.25)
-    stroke(doc, overlay.marks)
+    doc.strokeColor(MARK_INK).lineWidth(MARK_MM * MM).lineCap('butt')
+    if (overlay.cuts.length) stroke(doc, overlay.cuts)
+    if (overlay.joins.length) {
+      doc.dash(MARK_DASH[0] * MM, { space: MARK_DASH[1] * MM })
+      stroke(doc, overlay.joins)
+      doc.undash()
+    }
     doc.restore()
   }
-  if (q.marks.labels && sheet.h - (top + page.h) >= 3) {
+  for (const note of overlay.notes) {
     doc.save()
-    doc.fillColor('#555555').fontSize(6)
-    const text = `${overlay.label}   ${title}`
-    doc.text(text, left * MM, (top + page.h + 1) * MM, { lineBreak: false, width: page.w * MM, height: 8, ellipsis: true })
+    origin()
+    doc.translate(note.x * MM, note.y * MM).rotate(note.angle)
+    doc.fillColor('#555555').fontSize(NOTE_PT)
+    const width = doc.widthOfString(note.text)
+    doc.text(note.text, note.anchor === 'middle' ? -width / 2 : 0, 0, { lineBreak: false, baseline: 'middle' })
     doc.restore()
   }
 }
 
+const RULER_MM = 100
+const RULER_IN = 4
+/** Room for the ruler and its unit labels. */
+const RULER_W = RULER_IN * 25.4 + 7
+const RULER_H = 16
+
+/**
+ * A two-sided scale on one baseline: millimetres above, inches below. Printing
+ * at "fit to page" is the classic mistake, and a ruler shows it on the first sheet.
+ */
+function drawRuler(doc: PDFKit.PDFDocument, x: number, y: number) {
+  const tick = (at: number, length: number) => doc.moveTo((x + at) * MM, y * MM).lineTo((x + at) * MM, (y + length) * MM)
+  doc.save().strokeColor('#111111').lineWidth(0.1 * MM).lineCap('butt')
+  doc.moveTo(x * MM, y * MM).lineTo((x + RULER_IN * 25.4) * MM, y * MM)
+  for (let mm = 0; mm <= RULER_MM; mm++) tick(mm, -(mm % 10 === 0 ? 4 : mm % 5 === 0 ? 2.8 : 1.6))
+  for (let sixteenth = 0; sixteenth <= RULER_IN * 16; sixteenth++) {
+    const length = sixteenth % 16 === 0 ? 4 : sixteenth % 8 === 0 ? 3.2 : sixteenth % 4 === 0 ? 2.4 : sixteenth % 2 === 0 ? 1.8 : 1.2
+    tick((sixteenth * 25.4) / 16, length)
+  }
+  doc.stroke()
+  doc.fillColor('#333333').fontSize(6)
+  const label = (text: string, at: number, ty: number, baseline: 'bottom' | 'top') => {
+    const width = doc.widthOfString(text)
+    doc.text(text, (x + at) * MM - width / 2, ty * MM, { lineBreak: false, baseline })
+  }
+  for (let mm = 0; mm <= RULER_MM; mm += 10) label(String(mm), mm, y - 4.6, 'bottom')
+  for (let inch = 0; inch <= RULER_IN; inch++) label(String(inch), inch * 25.4, y + 4.6, 'top')
+  doc.text('mm', (x + RULER_IN * 25.4 + 2) * MM, (y - 1) * MM, { lineBreak: false, baseline: 'bottom' })
+  doc.text('in', (x + RULER_IN * 25.4 + 2) * MM, (y + 1) * MM, { lineBreak: false, baseline: 'top' })
+  doc.restore()
+}
+
+/** Short how-to for the cut-and-overlap marks on the map sheets. */
+function assemblySteps(q: PrintRequest): string[] {
+  const first = q.pages[0]?.label ?? 'A1'
+  const overlap = planFor(q).some((p) => p?.edges.some((e) => e.overlap > 0.5))
+  return [
+    '1.  Cut each sheet on its solid lines only (CUT edges): usually just the top and left, plus the outer edges of the map. Leave the dashed KEEP margins on.',
+    `2.  Lay down ${first}, then work left to right and row by row: lay each sheet's cut edge over the kept margin of the sheet before it, ${
+      overlap ? 'right on that sheet\'s dashed line, so the overlapping strip of map lines up.' : 'right against that sheet\'s map edge.'}`,
+    '3.  Tape the joins on the back.',
+    'Every cut line runs out to the paper\'s edge, so the second cut still has its line after the first one.',
+  ]
+}
+
 async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, title: string) {
-  const { sheetW, sheetH } = q.pages[0]
-  const landscape = sheetW > sheetH
-  doc.addPage({ size: [sheetW * MM, sheetH * MM], margin: 0 })
   const margin = Math.max(q.marginMm, 10)
-  const mapW = (q.grid.cols * q.squareMm)
-  const mapH = (q.grid.rows * q.squareMm)
-
-  doc.fillColor('#111111').fontSize(16).text(title, margin * MM, margin * MM, { width: (sheetW - margin * 2) * MM, lineBreak: false, height: 20, ellipsis: true })
-  const summary = `${q.pages.length} sheets   ${Math.round(q.grid.cols)} × ${Math.round(q.grid.rows)} squares   ${q.squareMm.toFixed(1)} mm per square   ${(mapW / 10).toFixed(1)} × ${(mapH / 10).toFixed(1)} cm`
-  doc.fillColor('#555555').fontSize(9).text(summary, margin * MM, (margin + 8) * MM, { lineBreak: false })
-
-  // Printing at "fit to page" is the classic mistake; this bar exposes it on the first sheet.
-  const barY = sheetH - margin - 8
-  doc.fillColor('#111111').rect(margin * MM, barY * MM, 25.4 * MM, 3 * MM).fill()
-  doc.rect((margin + 40) * MM, barY * MM, 25 * MM, 3 * MM).fill()
-  doc.fillColor('#555555').fontSize(7)
-  doc.text('1 inch', margin * MM, (barY + 4) * MM, { lineBreak: false })
-  doc.text('25 mm', (margin + 40) * MM, (barY + 4) * MM, { lineBreak: false })
-  doc.text('Print at 100% / actual size. If these bars measure wrong, turn off "fit to page".', (margin + 72) * MM, barY * MM, {
-    width: (sheetW - margin * 2 - 72) * MM,
-  })
-
-  const areaTop = margin + 16
-  const areaH = barY - areaTop - 6
-  const areaW = sheetW - margin * 2
+  const mapW = q.grid.cols * q.squareMm
+  const mapH = q.grid.rows * q.squareMm
   const bounds = q.pages.reduce(
     (b, p) => ({ x: Math.min(b.x, p.x), y: Math.min(b.y, p.y), r: Math.max(b.r, p.x + p.w), b: Math.max(b.b, p.y + p.h) }),
     { x: 0, y: 0, r: mapW, b: mapH },
   )
-  const scale = Math.min(areaW / (bounds.r - bounds.x), areaH / (bounds.b - bounds.y))
-  const ox = margin + (areaW - (bounds.r - bounds.x) * scale) / 2 - bounds.x * scale
-  const oy = areaTop + (landscape ? 0 : (areaH - (bounds.b - bounds.y) * scale) / 2) - bounds.y * scale
+  const square = q.squareMm <= 40 ? q.squareMm : 0
+  const checkW = RULER_W + (square ? 10 + Math.max(square, 24) : 0)
+  const hint = 'Print at 100% / actual size, with "fit to page" turned off. The scale must measure 100 mm and 4 in'
+    + (square ? ', and the box one grid square.' : '.')
+  const steps = q.marks.cut ? assemblySteps(q) : []
+  const textH = (text: string, width: number, size: number) => doc.fontSize(size).heightOfString(text, { width: width * MM, lineGap: 1 }) / MM
+  const stepsH = (width: number) => steps.length ? 5 + steps.reduce((h, s) => h + textH(s, width, 7.5) + 1, 0) : 0
 
+  // The map need not lie the way the sheets do. Turn the page with the map, unless
+  // the other way shows it clearly larger (the notes take more room beside it).
+  const short = Math.min(q.pages[0].sheetW, q.pages[0].sheetH)
+  const long = Math.max(q.pages[0].sheetW, q.pages[0].sheetH)
+  const layouts = [[short, long], [long, short]].map(([w, h]) => {
+    const besideW = w - margin * 2 - checkW - 10
+    const beside = besideW >= 80
+    const stepsW = beside ? besideW : w - margin * 2
+    const checkH = Math.max(RULER_H + 3 + textH(hint, RULER_W, 7), square ? square + 6 : 0)
+    const footerH = beside ? Math.max(checkH, stepsH(stepsW)) : checkH + (steps.length ? stepsH(stepsW) + 6 : 0)
+    const area = { x: margin, y: margin + 18, w: w - margin * 2, h: h - margin * 2 - 18 - footerH - 6 }
+    const scale = Math.min(area.w / (bounds.r - bounds.x), area.h / (bounds.b - bounds.y))
+    return { w, h, beside, stepsW, checkH, footerH, area, scale }
+  })
+  const [a, b] = bounds.r - bounds.x > bounds.b - bounds.y ? [layouts[1], layouts[0]] : layouts
+  const { w: sheetW, h: sheetH, beside, stepsW, checkH, footerH, area, scale } = b.scale > a.scale * 1.15 ? b : a
+  doc.addPage({ size: [sheetW * MM, sheetH * MM], margin: 0 })
+
+  doc.fillColor('#111111').fontSize(16).text(title, margin * MM, margin * MM, { width: (sheetW - margin * 2) * MM, lineBreak: false, height: 20, ellipsis: true })
+  const summary = `${q.pages.length} sheets   ${Math.round(q.grid.cols)} × ${Math.round(q.grid.rows)} squares   ${q.squareMm.toFixed(1)} mm per square   ${(mapW / 10).toFixed(1)} × ${(mapH / 10).toFixed(1)} cm`
+    + (q.crop ? `   printing ${(q.crop.w / 10).toFixed(1)} × ${(q.crop.h / 10).toFixed(1)} cm of it` : '')
+  doc.fillColor('#555555').fontSize(9).text(summary, margin * MM, (margin + 8) * MM, { lineBreak: false })
+
+  const ox = area.x + (area.w - (bounds.r - bounds.x) * scale) / 2 - bounds.x * scale
+  const oy = area.y + (area.h - (bounds.b - bounds.y) * scale) / 2 - bounds.y * scale
+  const at = (r: Rect) => [(ox + r.x * scale) * MM, (oy + r.y * scale) * MM, r.w * scale * MM, r.h * scale * MM] as const
   const preview = await sharp(thumbPath(file.id, 'large')).jpeg({ quality: 80 }).toBuffer()
   doc.image(preview, ox * MM, oy * MM, { width: mapW * scale * MM, height: mapH * scale * MM })
   const fog = await bakedLayer(q, { x: 0, y: 0, w: mapW, h: mapH }, FOG_PX_PER_MM * scale)
   if (fog) doc.image(fog, ox * MM, oy * MM, { width: mapW * scale * MM, height: mapH * scale * MM })
+  if (q.crop) {
+    // Fade what is left out, so the printed part reads at a glance.
+    doc.save()
+    doc.rect(...at({ x: 0, y: 0, w: mapW, h: mapH })).rect(...at(q.crop)).fillColor('#ffffff').fillOpacity(0.6).fill('even-odd')
+    doc.restore()
+    doc.save().rect(...at(q.crop)).lineWidth(0.6).strokeColor('#d02020').dash(3, { space: 2 }).stroke().restore()
+  }
   for (const p of q.pages) {
-    const [x, y, w, h] = [(ox + p.x * scale) * MM, (oy + p.y * scale) * MM, p.w * scale * MM, p.h * scale * MM]
+    const [x, y, w, h] = at(p)
     doc.rect(x, y, w, h).lineWidth(0.75).strokeColor('#ffffff').stroke()
     doc.rect(x, y, w, h).lineWidth(0.25).strokeColor('#000000').stroke()
     const size = Math.min(10, h * 0.3)
     doc.fontSize(size).fillColor('#ffffff').text(p.label, x, y + h / 2 - size / 2, { width: w, align: 'center', lineBreak: false, stroke: true, fill: true })
+  }
+
+  const footerY = sheetH - margin - footerH
+  if (steps.length) {
+    let y = footerY
+    const x = beside ? margin + checkW + 10 : margin
+    doc.fillColor('#111111').fontSize(9).text('Putting it together', x * MM, y * MM, { lineBreak: false })
+    y += 5
+    doc.fillColor('#333333')
+    for (const step of steps) {
+      doc.fontSize(7.5).text(step, x * MM, y * MM, { width: stepsW * MM, lineGap: 1 })
+      y += textH(step, stepsW, 7.5) + 1
+    }
+  }
+  const checkY = beside ? footerY : sheetH - margin - checkH
+  drawRuler(doc, margin, checkY + 7)
+  doc.fillColor('#555555').fontSize(7).text(hint, margin * MM, (checkY + RULER_H + 1) * MM, { width: RULER_W * MM, lineGap: 1 })
+  if (square) {
+    const sx = margin + RULER_W + 10
+    doc.save().rect(sx * MM, (checkY + 1) * MM, square * MM, square * MM).lineWidth(0.15 * MM).strokeColor('#111111').stroke().restore()
+    const name = q.grid.type === 'square' ? 'square' : 'hex across'
+    doc.fillColor('#555555').fontSize(6).text(`1 ${name} = ${q.squareMm.toFixed(1)} mm`, sx * MM, (checkY + square + 2.5) * MM, { lineBreak: false })
   }
 }
 
@@ -402,18 +559,24 @@ async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: 
 }
 
 function overlaySvg(q: PrintRequest, sheet: Sheet, overlay: Overlay): string {
-  const { page, left, top } = sheet
+  const { left, top } = sheet
   const path = (segments: Segment[]) => segments.map(([a, b, c, d]) => `M${a.toFixed(2)} ${b.toFixed(2)}L${c.toFixed(2)} ${d.toFixed(2)}`).join('')
   const numbers = overlay.numbers
     .map((n) => `<text x="${n.x.toFixed(2)}" y="${(n.y + q.squareMm * 0.1).toFixed(2)}" font-size="${(q.squareMm * 0.12).toFixed(2)}" text-anchor="middle" font-family="sans-serif">${n.text}</text>`)
     .join('')
+  const notes = overlay.notes
+    .map((n) => `<text transform="translate(${n.x.toFixed(2)} ${n.y.toFixed(2)}) rotate(${n.angle})" text-anchor="${n.anchor}" dominant-baseline="central">${escapeXml(n.text)}</text>`)
+    .join('')
+  const marks = `stroke="${MARK_INK}" stroke-width="${MARK_MM}" fill="none"`
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sheet.w} ${sheet.h}">
     <clipPath id="c"><rect x="${overlay.clip.x}" y="${overlay.clip.y}" width="${overlay.clip.w}" height="${overlay.clip.h}"/></clipPath>
     <g transform="translate(${left} ${top})">
       <g clip-path="url(#c)" fill="${q.overlay.color}" stroke="none" opacity="${q.overlay.opacity}">
         <path d="${path(overlay.grid)}" stroke="${q.overlay.color}" stroke-width="${q.overlay.widthMm}" fill="none"/>${numbers}
       </g>
-      <path d="${path(overlay.marks)}" stroke="#000" stroke-width="0.1" fill="none"/>
+      <path d="${path(overlay.cuts)}" ${marks}/>
+      <path d="${path(overlay.joins)}" ${marks} stroke-dasharray="${MARK_DASH.join(' ')}"/>
+      <g font-family="Helvetica, Arial, sans-serif" font-size="${NOTE_MM.toFixed(3)}" fill="#555555">${notes}</g>
     </g></svg>`
 }
 

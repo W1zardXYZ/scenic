@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   PAPERS, generatePages, generatePagesIn, gridCandidates, sheetCount, pageLabel, columnsOf, intersect, gridSegments,
-  type PageSpec, type Plane,
+  assemblyPlan, contentOf, edgeLines, paperOf, type PageSpec, type Plane, type SheetPlan,
 } from './layout.ts'
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`)
@@ -250,4 +250,91 @@ test('gridCandidates puts sizes that divide the map evenly first', () => {
   const [best] = gridCandidates(7000, 7000)
   assert.equal(best.pps, 140)
   assert.equal(best.cols, 50)
+})
+
+// The user's case: a 30×20 map at 25.4 mm, cropped, on A4 portrait.
+const userCase = (overlapMm = 0) => {
+  const image = { x: 0, y: 0, w: 30 * 25.4, h: 20 * 25.4 }
+  const crop = { x: 25.4, y: 25.4, w: 711.2, h: 457.2 }
+  const pages = generatePagesIn(crop, { ...image, offsetX: 0, offsetY: 0 }, spec({ marginMm: 8, overlapMm, centered: true }))
+  return { image, crop, pages, plan: assemblyPlan(pages, image, crop) }
+}
+
+test('contentOf and paperOf: content is page ∩ image ∩ crop, paper is centred on the page', () => {
+  const page = { x: 600, y: 300, w: 177.8, h: 279.4, sheetW: 210, sheetH: 297 }
+  const image = { x: 0, y: 0, w: 762, h: 508 }
+  assert.deepEqual(contentOf(page, image), { x: 600, y: 300, w: 162, h: 208 })
+  const crop = { x: 25.4, y: 25.4, w: 711.2, h: 457.2 }
+  const c = contentOf(page, image, crop)!
+  near(c.x + c.w, 736.6)
+  near(c.y + c.h, 482.6)
+  assert.equal(contentOf(page, image, { x: 0, y: 0, w: 100, h: 100 }), null)
+  const paper = paperOf(page)
+  near(paper.x, 600 - 16.1)
+  near(paper.y, 300 - 8.8)
+  assert.equal(paper.w, 210)
+})
+
+test('assemblyPlan: 4×2 grid cuts top and left, keeps edges that a later sheet covers', () => {
+  const { pages, plan } = userCase()
+  assert.equal(pages.length, 8)
+  assert.equal(columnsOf(pages), 4)
+  const at = (col: number, row: number) => plan[row * 4 + col]!
+  const sides = (p: SheetPlan) => p.edges.map((e) => `${e.side}:${e.action}:${e.neighbour}`).join(' ')
+  assert.equal(sides(at(0, 0)), 'top:cut:-1 right:keep:1 bottom:keep:4 left:cut:-1')
+  assert.equal(sides(at(1, 0)), 'top:cut:-1 right:keep:2 bottom:keep:5 left:cut:0')
+  assert.equal(sides(at(3, 1)), 'top:cut:3 right:cut:-1 bottom:cut:-1 left:cut:6')
+  // Without overlap, joins are where the content of neighbours meet.
+  for (const p of plan) {
+    for (const e of p!.edges) assert.equal(Math.abs(e.overlap) < 1e-6, true)
+  }
+  near(at(0, 0).edges[1].at, at(1, 0).content.x)
+  near(at(0, 0).edges[1].at, at(0, 0).content.x + at(0, 0).content.w)
+  // Rows hang over the crop at both ends; the content stops at the crop.
+  near(at(0, 0).content.y, 25.4)
+  near(at(0, 1).content.y + at(0, 1).content.h, 482.6)
+  assert.ok(pages[0].y < 0 && pages[4].y + pages[4].h > 500)
+})
+
+test('assemblyPlan: with overlap the join is where the next sheet starts', () => {
+  const { plan } = userCase(10)
+  const [a, b] = plan as SheetPlan[]
+  assert.equal(a.edges[1].action, 'keep')
+  near(a.edges[1].at, b.content.x)
+  near(a.edges[1].overlap, 10)
+  near(b.edges[3].overlap, 10)
+  assert.ok(a.edges[1].at < a.content.x + a.content.w)
+})
+
+test('assemblyPlan: hand-placed sheets find neighbours by position, not order', () => {
+  const image = { x: 0, y: 0, w: 400, h: 400 }
+  const page = (x: number, y: number) => ({ x, y, w: 150, h: 150, sheetW: 170, sheetH: 170 })
+  const plan = assemblyPlan([page(150, 0), page(0, 0), page(300, 300)], image)
+  assert.equal(plan[0]!.edges[3].neighbour, 1)
+  assert.equal(plan[1]!.edges[1].neighbour, 0)
+  // A sheet that only touches a corner is no neighbour.
+  assert.ok(plan[2]!.edges.every((e) => e.neighbour === -1 && e.action === 'cut'))
+})
+
+test('edgeLines: run from the content corners to the paper edge, never over the content', () => {
+  const { pages, plan } = userCase()
+  pages.forEach((page, i) => {
+    const p = plan[i]!
+    const paper = paperOf(page)
+    for (const edge of p.edges) {
+      const lines = edgeLines(paper, p.content, edge)
+      for (const [x1, y1, x2, y2] of lines) {
+        const inside = (x: number, y: number) => x > p.content.x && x < p.content.x + p.content.w && y > p.content.y && y < p.content.y + p.content.h
+        assert.ok(!inside((x1 + x2) / 2, (y1 + y2) / 2))
+        assert.ok(x1 >= paper.x - 1e-6 && x2 <= paper.x + paper.w + 1e-6 && y1 >= paper.y - 1e-6 && y2 <= paper.y + paper.h + 1e-6)
+      }
+      if (edge.side === 'left') {
+        // One line above the content, one below, both reaching the paper's edges.
+        assert.equal(lines.length, 2)
+        near(lines[0][1], paper.y)
+        near(lines[1][3], paper.y + paper.h)
+        near(lines[0][0], p.content.x)
+      }
+    }
+  })
 })
