@@ -44,7 +44,7 @@ export function LevelsControl({ src, filter, setFilter }: {
     <div className="flex flex-col gap-3" role="group" aria-label="Levels">
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">Levels</span>
-        <IconButton label="Reset levels" icon={RotateCcw} disabled={isNeutral(levels)} onClick={() => apply(NEUTRAL_LEVELS)} className="-my-2 -mr-2" />
+        <IconButton label="Reset levels" icon={RotateCcw} disabled={isNeutral(levels)} onClick={() => apply(NEUTRAL_LEVELS)} className="-my-2" />
       </div>
 
       {/* Inset by half a handle, so a handle's centre lines up with its histogram value. */}

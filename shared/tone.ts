@@ -32,6 +32,25 @@ export interface Filter {
   bands: Band[]
   /** Lighten (> 0) or darken (< 0) one family of hues each, -1 to 1, in the order of `HUES`. */
   hues: number[]
+  /** Colour range selections, applied in order like layers. */
+  selections: Selection[]
+}
+
+/** A colour picked from the source map; a subtracting sample takes its colours back out. */
+export interface Sample {
+  color: string
+  subtract: boolean
+}
+
+/** Pixels picked by source colour, as Photoshop's Color Range picks them, and how to change their brightness. */
+export interface Selection {
+  samples: Sample[]
+  /** How far from a sample still counts, in OKLab distance × 100; the edge fades out softly. */
+  fuzziness: number
+  /** Brightness in → out for the selected pixels. */
+  curve: [number, number][]
+  /** After the curve: toward white (> 0) or black (< 0), -1 to 1. */
+  amount: number
 }
 
 export const NEUTRAL_LEVELS: Levels = { black: 0, white: 255, gamma: 1 }
@@ -40,8 +59,12 @@ export const HUES = ['Reds', 'Yellows', 'Greens', 'Cyans', 'Blues', 'Magentas'] 
 export const NO_HUES = HUES.map(() => 0)
 export const MAX_CURVE_POINTS = 16
 export const MAX_BANDS = 8
+export const MAX_SELECTIONS = 8
+export const MAX_SAMPLES = 16
+export const FUZZINESS = { min: 1, max: 100, start: 12 }
 
-export const NEW_FILTER: Filter = { mode: 'color', amount: 0.3, levels: NEUTRAL_LEVELS, curve: STRAIGHT, bands: [], hues: NO_HUES }
+export const NEW_FILTER: Filter = { mode: 'color', amount: 0.3, levels: NEUTRAL_LEVELS, curve: STRAIGHT, bands: [], hues: NO_HUES, selections: [] }
+export const NEW_SELECTION: Selection = { samples: [], fuzziness: FUZZINESS.start, curve: STRAIGHT, amount: 0 }
 
 export const CURVE_PRESETS: [string, [number, number][]][] = [
   ['Lighten shadows', [[0, 0], [64, 112], [255, 255]]],
@@ -188,19 +211,112 @@ export function shiftHues(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4,
 /** Grey value of an sRGB pixel, with the weights the histogram uses. */
 export const greyOf = (r: number, g: number, b: number) => Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b)
 
+const LINEAR = Float64Array.from({ length: 256 }, (_, v) => {
+  const c = v / 255
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+})
+
+/** OKLab of an sRGB pixel, ×100 so that distances read like percentages. */
+export function oklab(r: number, g: number, b: number): [number, number, number] {
+  const [lr, lg, lb] = [LINEAR[r], LINEAR[g], LINEAR[b]]
+  const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb)
+  const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb)
+  const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb)
+  return [
+    (0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s) * 100,
+    (1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s) * 100,
+    (0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s) * 100,
+  ]
+}
+
+export const hexToRgb = (hex: string): [number, number, number] => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [number, number, number]
+export const rgbToHex = (r: number, g: number, b: number) => `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`
+
+const smooth = (t: number) => t * t * (3 - 2 * t)
+
+/** How much a colour belongs to a selection, 0-1, from its OKLab values. */
+export type Weigher = (L: number, A: number, B: number) => number
+
+/** Full weight at a sample, fading smoothly to none at `fuzziness` away; subtracting samples take their share back out. */
+export function selectionWeigher({ samples, fuzziness }: Selection): Weigher {
+  const labs = samples.map((s) => ({ lab: oklab(...hexToRgb(s.color)), subtract: s.subtract }))
+  const adds = labs.filter((s) => !s.subtract).map((s) => s.lab)
+  const subs = labs.filter((s) => s.subtract).map((s) => s.lab)
+  const near = (points: [number, number, number][], L: number, A: number, B: number) => {
+    let best = 0
+    for (const [l, a, b] of points) {
+      const d = Math.hypot(L - l, A - a, B - b)
+      if (d < fuzziness) best = Math.max(best, smooth(1 - d / fuzziness))
+    }
+    return best
+  }
+  return (L, A, B) => {
+    const add = near(adds, L, A, B)
+    return add && subs.length ? add * (1 - near(subs, L, A, B)) : add
+  }
+}
+
+
+/** What a selection does to each value, rounded to whole values like the rest of the print. */
+function selectionTable({ curve, amount }: Selection): Float64Array {
+  const f = curveFunction(curve)
+  return Float64Array.from({ length: 256 }, (_, v) => push(f(v), amount))
+}
+
+/**
+ * Applies each selection to the pixels, in place and in order. Which pixels
+ * belong is decided by their colour before anything else changes them.
+ */
+function applySelections(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, selections: Selection[], weights: Float32Array[]) {
+  selections.forEach((selection, k) => {
+    const table = selectionTable(selection)
+    const w = weights[k]
+    for (let i = 0, j = 0; i < data.length; i += channels, j++) {
+      if (!w[j]) continue
+      for (let c = 0; c < 3; c++) data[i + c] = Math.round(data[i + c] + w[j] * (table[data[i + c]] - data[i + c]))
+    }
+  })
+}
+
+/** Each selection's weight for every pixel, 0-1. */
+export function selectionWeights(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, selections: Selection[]): Float32Array[] {
+  const pixels = data.length / channels
+  const weighers = selections.map(selectionWeigher)
+  const weights = selections.map(() => new Float32Array(pixels))
+  if (!selections.some((s) => s.samples.some((x) => !x.subtract))) return weights
+  // Maps are mostly a few colours repeated; most pixels match one seen before.
+  const seen = new Map<number, number>()
+  for (let i = 0, j = 0; i < data.length; i += channels, j++) {
+    const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2]
+    let at = seen.get(key)
+    if (at === undefined) {
+      if (seen.size > 1 << 18) seen.clear()
+      at = j
+      seen.set(key, j)
+      const [L, A, B] = oklab(data[i], data[i + 1], data[i + 2])
+      for (let k = 0; k < weighers.length; k++) weights[k][j] = weighers[k](L, A, B)
+    } else for (let k = 0; k < weighers.length; k++) weights[k][j] = weights[k][at]
+  }
+  return weights
+}
+
 /**
  * The part of the filter that looks at whole pixels rather than one value at a
- * time, in place: hue families, then grey in the grey modes. `printTable` does
- * the rest, on each channel.
+ * time, in place: colour selections (picked by source colour), hue families,
+ * then grey in the grey modes. `printTable` does the rest, on each channel.
  */
 export function prepareColours(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, filter: Filter) {
+  const weights = filter.selections.length ? selectionWeights(data, channels, filter.selections) : []
   shiftHues(data, channels, filter.hues)
+  applySelections(data, channels, filter.selections, weights)
   if (!isGrey(filter)) return
   for (let i = 0; i < data.length; i += channels) data[i] = data[i + 1] = data[i + 2] = greyOf(data[i], data[i + 1], data[i + 2])
 }
 
+const changes = (s: Selection) => s.amount !== 0 || !isStraight(s.curve)
+
 /** Whether `prepareColours` changes anything. */
-export const needsPreparing = (filter: Filter) => isGrey(filter) || filter.hues.some((h) => h !== 0)
+export const needsPreparing = (filter: Filter) => isGrey(filter) || filter.hues.some((h) => h !== 0) || filter.selections.some(changes)
 
 /** The whole filter on raw RGB pixels. Returns one channel in the grey modes, three otherwise. */
 export function filterPixels(rgb: Uint8Array, filter: Filter): { data: Uint8Array; channels: 1 | 3 } {
@@ -217,4 +333,4 @@ export function filterPixels(rgb: Uint8Array, filter: Filter): { data: Uint8Arra
 
 /** True when the filter leaves every pixel as it is. */
 export const isPlain = (filter: Filter) => filter.mode === 'color' && isStraight(filter.curve) &&
-  filter.bands.every((b) => b.amount === 0) && filter.hues.every((h) => h === 0)
+  filter.bands.every((b) => b.amount === 0) && !needsPreparing(filter)

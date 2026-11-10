@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { type Filter, needsPreparing, prepareColours } from '../../shared/tone.ts'
+import { type Filter, needsPreparing, prepareColours, type Selection, selectionWeights } from '../../shared/tone.ts'
 
 const pixels = new Map<string, Promise<ImageData>>()
 
-function pixelsOf(src: string): Promise<ImageData> {
+/** The decoded pixels of an image, kept per image. */
+export function pixelsOf(src: string): Promise<ImageData> {
   let loading = pixels.get(src)
   if (!loading) {
     loading = new Promise<ImageData>((resolve, reject) => {
@@ -29,17 +30,14 @@ function pixelsOf(src: string): Promise<ImageData> {
 const SETTLE_MS = 60
 
 /**
- * The preview image with the whole-pixel part of the filter (hue families,
- * grey) already applied by the same code the renderer runs. The per-value
- * part is cheap enough for an SVG table on top.
+ * A copy of `src` made by `make`, as an object URL, redone whenever `key`
+ * changes; an empty key makes nothing. Until a new copy is ready, the last
+ * one stands in while it was made from the same image under the same `kind`.
  */
-export function usePreparedImage(src: string, filter: Filter): string {
-  const needed = needsPreparing(filter)
-  const grey = filter.mode === 'grey' || filter.mode === 'threshold'
-  const key = needed ? JSON.stringify([src, grey, filter.hues]) : ''
-  const [ready, setReady] = useState<{ src: string; grey: boolean; url: string } | null>(null)
-  const latest = useRef(filter)
-  latest.current = filter
+function useImageFrom(src: string, key: string, kind: string, make: (image: ImageData) => void): string | null {
+  const [ready, setReady] = useState<{ src: string; kind: string; url: string } | null>(null)
+  const latest = useRef(make)
+  latest.current = make
   const url = useRef('')
 
   useEffect(() => {
@@ -49,7 +47,7 @@ export function usePreparedImage(src: string, filter: Filter): string {
       const source = await pixelsOf(src).catch(() => null)
       if (stopped || !source) return
       const image = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height)
-      prepareColours(image.data, 4, latest.current)
+      latest.current(image)
       const canvas = document.createElement('canvas')
       canvas.width = image.width
       canvas.height = image.height
@@ -58,17 +56,41 @@ export function usePreparedImage(src: string, filter: Filter): string {
         if (stopped || !blob) return
         if (url.current) URL.revokeObjectURL(url.current)
         url.current = URL.createObjectURL(blob)
-        setReady({ src, grey, url: url.current })
+        setReady({ src, kind, url: url.current })
       })
     }, SETTLE_MS)
     return () => {
       stopped = true
       clearTimeout(timer)
     }
-  }, [key, src, grey])
+  }, [key, src, kind])
 
   useEffect(() => () => URL.revokeObjectURL(url.current), [])
 
-  // An older result stands in while a new one is made, as long as it shows the same map in the same kind of colour.
-  return needed && ready?.src === src && ready.grey === grey ? ready.url : src
+  return key && ready?.src === src && ready.kind === kind ? ready.url : null
+}
+
+/**
+ * The preview image with the whole-pixel part of the filter (selections, hue
+ * families, grey) already applied by the same code the renderer runs. The
+ * per-value part is cheap enough for an SVG table on top.
+ */
+export function usePreparedImage(src: string, filter: Filter): string {
+  const grey = filter.mode === 'grey' || filter.mode === 'threshold'
+  const key = needsPreparing(filter) ? JSON.stringify([grey, filter.hues, filter.selections]) : ''
+  return useImageFrom(src, key, grey ? 'grey' : 'colour', (image) => prepareColours(image.data, 4, filter)) ?? src
+}
+
+/** Photoshop's quick mask: what the selection leaves out, tinted. */
+export function useSelectionMask(src: string, selection: Selection | null): string | null {
+  const key = selection ? JSON.stringify([selection.samples, selection.fuzziness]) : ''
+  return useImageFrom(src, key, 'mask', (image) => {
+    const [weights] = selectionWeights(image.data, 4, [selection!])
+    for (let i = 0, j = 0; i < image.data.length; i += 4, j++) {
+      image.data[i] = 230
+      image.data[i + 1] = 30
+      image.data[i + 2] = 60
+      image.data[i + 3] = Math.round((1 - weights[j]) * 150)
+    }
+  })
 }

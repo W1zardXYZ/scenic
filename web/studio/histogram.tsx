@@ -35,7 +35,8 @@ export function useHistogram(src: string): Uint32Array | null {
 export const Histogram = memo(function Histogram({ bins, className }: { bins: ArrayLike<number>; className?: string }) {
   const path = useMemo(() => {
     // A few spikes (pure black backgrounds) must not flatten everything else.
-    const peak = [...Array.from(bins)].sort((a, b) => a - b)[250] || 1
+    const sorted = Array.from(bins).sort((a, b) => a - b)
+    const peak = sorted[250] || sorted[255] || 1
     let d = 'M0 100'
     for (let v = 0; v < 256; v++) d += `L${v} ${(100 - Math.min(1, bins[v] / peak) * 100).toFixed(1)}`
     return `${d}L255 100Z`

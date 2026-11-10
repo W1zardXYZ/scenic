@@ -1,9 +1,9 @@
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { CloudFog, Crop, Hand, Lasso, Magnet, Maximize, MousePointer2, Pentagon, Plus, Redo2, Ruler, RotateCw, Square, SquarePlus, SquaresSubtract, SquaresUnite, Trash2, Undo2, ZoomOut, type LucideIcon } from 'lucide-react'
+import { CloudFog, Crop, Hand, Lasso, Magnet, Maximize, MousePointer2, Pentagon, Pipette, Plus, Redo2, Ruler, RotateCw, Square, SquarePlus, SquaresSubtract, SquaresUnite, Trash2, Undo2, ZoomOut, type LucideIcon } from 'lucide-react'
 import { fadeMask, fadeRegion } from '../../shared/fade.ts'
 import { curveFromStroke, type CurvePoint, type Fog, fogBounds, type FogPart, type FogShape, fogPath, inkOn, liveFog, nearestOnCurve, partBounds, partPath, sharpCurve, splitCurve, withoutPart } from '../../shared/fog.ts'
 import { gridSegments, hexNumbers, type Page, type PageSpec, type Plane, type Rect } from '../../shared/layout.ts'
-import { isPlain, printTable } from '../../shared/tone.ts'
+import { isPlain, printTable, rgbToHex } from '../../shared/tone.ts'
 import type { MapRecord } from '../../shared/types.ts'
 import { Hint, IconButton, IconToggle } from '@/components/controls'
 import { Button } from '@/components/ui/button'
@@ -13,14 +13,14 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { announce } from '../announce.ts'
 import { thumb } from '../api.ts'
 import { lassoTouches, type Point, rectsTouch } from './hit.ts'
-import type { Filter, FogCombine, FogDraw, Grid, LabeledPage, Overlay, Tool } from './types.ts'
-import { usePreparedImage } from './use-prepared-image.ts'
+import type { Filter, FogCombine, FogDraw, Grid, LabeledPage, Overlay, PickHow, Selection, Tool } from './types.ts'
+import { pixelsOf, usePreparedImage, useSelectionMask } from './use-prepared-image.ts'
 
 const SNAP_PX = 10
 const TOOLBAR_PX = 64
 const SNAP_FOG_PX = 12
 
-const TOOL_HINT: Partial<Record<Tool, string>> = { page: 'Click to place a sheet, or press Enter to add one beside the current sheet', crop: 'Drag the area to print', measure: 'Drag over exactly one square or hex' }
+const TOOL_HINT: Partial<Record<Tool, string>> = { page: 'Click to place a sheet, or press Enter to add one beside the current sheet', crop: 'Drag the area to print', measure: 'Drag over exactly one square or hex', pick: 'Click the map to pick a colour. Shift-click adds one, Alt-click takes one out' }
 
 const TOOLS: { value: Tool; label: string; shortcut: string; icon: LucideIcon }[] = [
   { value: 'select', label: 'Select', shortcut: 'S', icon: MousePointer2 },
@@ -30,6 +30,7 @@ const TOOLS: { value: Tool; label: string; shortcut: string; icon: LucideIcon }[
   { value: 'crop', label: 'Print crop', shortcut: 'X', icon: Crop },
   { value: 'fog', label: 'Add fog', shortcut: 'F', icon: CloudFog },
   { value: 'measure', label: 'Measure one square', shortcut: 'M', icon: Ruler },
+  { value: 'pick', label: 'Pick colours to select', shortcut: 'I', icon: Pipette },
 ]
 
 const FOG_HINT: Record<FogDraw, string> = {
@@ -104,13 +105,15 @@ const SheetEdges = memo(function SheetEdges({ pages }: { pages: LabeledPage[] })
   ))
 })
 
-const Art = memo(function Art({ map, plane, gridType, sq, overlay, filter }: {
+const Art = memo(function Art({ map, plane, gridType, sq, overlay, filter, mask }: {
   map: MapRecord
   plane: Plane
   gridType: Grid['type']
   sq: number
   overlay: Overlay
   filter: Filter
+  /** The selection to show as a quick mask, if any. */
+  mask: Selection | null
 }) {
   const showGridGuide = overlay.show
   const overlayPath = useMemo(() => {
@@ -127,6 +130,7 @@ const Art = memo(function Art({ map, plane, gridType, sq, overlay, filter }: {
   // Browsers cut the looked-up value down to 8 bits rather than rounding it; a quarter step up lands each on its own value.
   const table = useMemo(() => Array.from(printTable(filter), (v) => Math.min(1, (v + 0.25) / 255).toFixed(5)).join(' '), [filter])
   const href = usePreparedImage(thumb(map, 'large'), filter)
+  const maskHref = useSelectionMask(thumb(map, 'large'), mask)
 
   return (
     <>
@@ -143,6 +147,7 @@ const Art = memo(function Art({ map, plane, gridType, sq, overlay, filter }: {
         </filter>
       </defs>
       <image href={href} x={0} y={0} width={plane.w} height={plane.h} preserveAspectRatio="none" style={{ filter: isPlain(filter) ? undefined : 'url(#tone)' }} />
+      {mask && maskHref && <image href={maskHref} x={0} y={0} width={plane.w} height={plane.h} preserveAspectRatio="none" />}
       {overlayPath && (
         <path d={overlayPath} fill="none" stroke={overlay.color} strokeOpacity={overlay.opacity} strokeWidth={overlay.widthMm} vectorEffect="non-scaling-stroke" />
       )}
@@ -309,7 +314,7 @@ function marqueePath(points: Point[], lasso: boolean): string {
 }
 
 export function Canvas({
-  map, plane, spec, gridType, sq, overlay, filter, fadeMm, fog, pages, automatic, editPages, selected, setSelected, tool, setTool, fogDraw, setFogDraw, fogCombine, setFogCombine, fogSnap, setFogSnap, finishFogShape, changeFogParts, mergeFog, removeFog, selectedFog, setSelectedFog, undo, redo, canUndo, canRedo, crop, onCrop, onMeasure, showSheets, backHref, shortcuts,
+  map, plane, spec, gridType, sq, overlay, filter, fadeMm, fog, pages, automatic, editPages, selected, setSelected, tool, setTool, fogDraw, setFogDraw, fogCombine, setFogCombine, fogSnap, setFogSnap, finishFogShape, changeFogParts, mergeFog, removeFog, selectedFog, setSelectedFog, undo, redo, canUndo, canRedo, crop, onCrop, onMeasure, onPick, mask, showSheets, backHref, shortcuts,
 }: {
   map: MapRecord
   plane: Plane
@@ -347,6 +352,9 @@ export function Canvas({
   crop: Rect | null
   onCrop: (crop: Rect) => void
   onMeasure: (cell: Rect) => void
+  /** A colour picked from the source map with the colour picker. */
+  onPick: (color: string, how: PickHow) => void
+  mask: Selection | null
   showSheets: boolean
   backHref: string
   shortcuts: boolean
@@ -589,6 +597,26 @@ export function Canvas({
       if (first) {
         addSheet(snapPage({ ...first, x: point.x - first.w / 2, y: point.y - first.h / 2 }, pages, plane, spec.overlapMm, 12 * mmPerPx(), sq, spec.seamsOnGrid))
       } else setTool('select')
+      return
+    }
+    if (active === 'pick') {
+      const how: PickHow = e.shiftKey ? 'add' : e.altKey ? 'subtract' : 'new'
+      void pixelsOf(thumb(map, 'large')).then(({ data, width, height }) => {
+        const cx = Math.floor((point.x / plane.w) * width)
+        const cy = Math.floor((point.y / plane.h) * height)
+        if (cx < 0 || cy < 0 || cx >= width || cy >= height) return
+        // A 3 by 3 average, as Photoshop samples, so one speck does not decide.
+        const sum = [0, 0, 0]
+        let n = 0
+        for (let y = Math.max(0, cy - 1); y <= Math.min(height - 1, cy + 1); y++) {
+          for (let x = Math.max(0, cx - 1); x <= Math.min(width - 1, cx + 1); x++, n++) {
+            for (let c = 0; c < 3; c++) sum[c] += data[(y * width + x) * 4 + c]
+          }
+        }
+        const color = rgbToHex(...(sum.map((v) => Math.round(v / n)) as [number, number, number]))
+        onPick(color, how)
+        announce(`${how === 'subtract' ? 'Took out' : how === 'add' ? 'Added' : 'Picked'} ${color}`)
+      })
       return
     }
     if (active === 'measure') {
@@ -986,10 +1014,10 @@ export function Canvas({
         aria-label="Print sheets"
         aria-describedby="canvas-help"
         data-tool={active}
-        className="block size-full cursor-default touch-none select-none data-[tool=crop]:cursor-crosshair data-[tool=measure]:cursor-crosshair data-[tool=fog]:cursor-crosshair data-[tool=hand]:cursor-grab data-[tool=hand]:active:cursor-grabbing data-[tool=page]:cursor-crosshair"
+        className="block size-full cursor-default touch-none select-none data-[tool=crop]:cursor-crosshair data-[tool=measure]:cursor-crosshair data-[tool=fog]:cursor-crosshair data-[tool=hand]:cursor-grab data-[tool=hand]:active:cursor-grabbing data-[tool=page]:cursor-crosshair data-[tool=pick]:cursor-crosshair"
       >
         <SheetBacks pages={pages} />
-        <Art map={map} plane={plane} gridType={gridType} sq={sq} overlay={overlay} filter={filter} />
+        <Art map={map} plane={plane} gridType={gridType} sq={sq} overlay={overlay} filter={filter} mask={mask} />
         <FadeVeil plane={plane} crop={crop} fadeMm={fadeMm} />
         {crop && <CropShade crop={crop} plane={plane} />}
         <FogLayer fog={fog} plane={plane} />

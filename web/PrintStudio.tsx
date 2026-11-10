@@ -6,7 +6,7 @@ import {
 } from '../shared/layout.ts'
 import { type FogItem, type FogPart, type FogShape, fogPlan, NEW_FOG, scaleFog } from '../shared/fog.ts'
 import type { Library, MapRecord } from '../shared/types.ts'
-import { NEW_FILTER } from '../shared/tone.ts'
+import { MAX_SAMPLES, MAX_SELECTIONS, NEW_FILTER, NEW_SELECTION } from '../shared/tone.ts'
 import { AppBar } from '@/components/app-bar'
 import { GradeBadge, Hint, IconButton, Segmented } from '@/components/controls'
 import { Trail } from '@/components/trail'
@@ -24,7 +24,7 @@ import { type Index, grade, pageSpec, type Prefs } from './filters.ts'
 import { sceneScope } from './scope.ts'
 import { Canvas } from './studio/Canvas.tsx'
 import { Settings } from './studio/Settings.tsx'
-import type { Filter, Fog, FogCombine, FogDraw, Grid, LabeledPage, Marks, Overlay, Tool } from './studio/types.ts'
+import type { Filter, Fog, FogCombine, FogDraw, Grid, LabeledPage, Marks, Overlay, PickHow, Tool } from './studio/types.ts'
 
 const IN = 25.4
 
@@ -50,6 +50,9 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const [lockAspect, setLockAspect] = useState(true)
   const [overlay, setOverlay] = useState<Overlay>({ show: !map.hasGrid, color: '#000000', opacity: 0.35, widthMm: 0.2, numbering: false })
   const [filter, setFilter] = useState<Filter>(NEW_FILTER)
+  // Which colour selection the picker and the settings work on, and whether its mask shows.
+  const [activeSelection, setActiveSelection] = useState(0)
+  const [showMask, setShowMask] = useState(false)
   const [marks, setMarks] = useState<Marks>({ cut: true, labels: true, overview: true })
   const [fadeMm, setFadeMm] = useState(0)
   // Kept as a share of the map, so fog stays on the same spot when the scale changes.
@@ -211,7 +214,24 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   useEffect(() => {
     if (tool === 'fog') setTab('extras')
     if (tool === 'crop') setTab('paper')
+    if (tool === 'pick') setTab('look')
   }, [tool])
+
+  /** A plain pick starts the selection over, Shift adds to it, Alt takes the colour out; with none yet, it makes one. */
+  const pickColour = useCallback((color: string, how: PickHow) => {
+    setFilter((f) => {
+      const current = f.selections[activeSelection]
+      if (!current) {
+        if (f.selections.length >= MAX_SELECTIONS || how === 'subtract') return f
+        setActiveSelection(f.selections.length)
+        return { ...f, selections: [...f.selections, { ...NEW_SELECTION, samples: [{ color, subtract: false }] }] }
+      }
+      const sample = { color, subtract: how === 'subtract' }
+      const samples = how === 'new' ? [sample] : current.samples.length < MAX_SAMPLES ? [...current.samples, sample] : current.samples
+      return { ...f, selections: f.selections.map((s) => (s === current ? { ...s, samples } : s)) }
+    })
+  }, [activeSelection])
+  const mask = (showMask || tool === 'pick') ? filter.selections[activeSelection] ?? null : null
 
   const request = useMemo(() => ({
     mapId: map.id,
@@ -317,6 +337,10 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
       setTool={setTool}
       tab={tab}
       setTab={setTab}
+      activeSelection={activeSelection}
+      setActiveSelection={setActiveSelection}
+      showMask={showMask}
+      setShowMask={setShowMask}
     />
   )
 
@@ -459,6 +483,8 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
           crop={crop}
           onCrop={changeCrop}
           onMeasure={measureCell}
+          onPick={pickColour}
+          mask={mask}
           showSheets={prefs.showSheets}
           backHref={`#/map/${map.id}`}
           shortcuts={prefs.shortcuts}

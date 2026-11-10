@@ -13,7 +13,7 @@ import {
   touches,
 } from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
-import { type Filter, filterPixels, HUES, isPlain, MAX_BANDS, MAX_CURVE_POINTS } from '../shared/tone.ts'
+import { type Filter, filterPixels, FUZZINESS, HUES, isPlain, MAX_BANDS, MAX_CURVE_POINTS, MAX_SAMPLES, MAX_SELECTIONS } from '../shared/tone.ts'
 import { PIXEL_LIMIT } from './analyze.ts'
 import type { FileRow } from './db.ts'
 import { safeName } from './export.ts'
@@ -61,6 +61,10 @@ const isToneCurve = (curve: Filter['curve']) => Array.isArray(curve) && curve.le
   curve.every((p, i) => Array.isArray(p) && p.length === 2 && finite(p[0], 0, 255) && finite(p[1], 0, 255) && (i === 0 || p[0] > curve[i - 1][0]))
 const isBand = (b: Filter['bands'][number]) => [b?.from, b?.to, b?.soft].every((v) => finite(v, 0, 255)) && b.from <= b.to && finite(b.amount, -1, 1)
 
+const isSelection = (s: Filter['selections'][number]) => Array.isArray(s?.samples) && s.samples.length <= MAX_SAMPLES &&
+  s.samples.every((x) => typeof x?.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) && typeof x.subtract === 'boolean') &&
+  finite(s.fuzziness, FUZZINESS.min, FUZZINESS.max) && isToneCurve(s.curve) && finite(s.amount, -1, 1)
+
 const MAX_FOG_CARDS = 1000
 
 /**
@@ -95,6 +99,7 @@ export function validatePrint(q: PrintRequest): string | null {
   if (!isToneCurve(q.filter.curve)) return 'curve'
   if (!Array.isArray(q.filter.bands) || q.filter.bands.length > MAX_BANDS || !q.filter.bands.every(isBand)) return 'bands'
   if (!Array.isArray(q.filter.hues) || q.filter.hues.length !== HUES.length || !q.filter.hues.every((h) => finite(h, -1, 1))) return 'hues'
+  if (!Array.isArray(q.filter.selections) || q.filter.selections.length > MAX_SELECTIONS || !q.filter.selections.every(isSelection)) return 'selections'
   if (!q.marks) return 'marks'
   if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill) ||
     !['undefined', 'boolean'].includes(typeof q.fog.names) || (q.fog.paper !== undefined && !PAPERS.some((p) => p.id === q.fog.paper))) return 'fog'
@@ -927,7 +932,7 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
 }
 
 /** Bump whenever the same request should print differently, so cached files from older layouts are not served. */
-const PRINT_LAYOUT = 6
+const PRINT_LAYOUT = 7
 
 export const printKey = (q: PrintRequest, file: FileRow) => `print|${PRINT_LAYOUT}|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
 

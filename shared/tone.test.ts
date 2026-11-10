@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  BAND_PRESETS, bandFunction, curveFunction, type Filter, filterPixels, isPlain, NEUTRAL_LEVELS, NEW_FILTER, printTable, shiftHues, toneCurve,
+  BAND_PRESETS, bandFunction, curveFunction, type Filter, filterPixels, greyOf, hexToRgb, isPlain, NEUTRAL_LEVELS, NEW_FILTER, NEW_SELECTION, oklab,
+  printTable, rgbToHex, selectionWeigher, selectionWeights, shiftHues, toneCurve,
 } from './tone.ts'
 
 test('neutral levels change nothing', () => {
@@ -111,4 +112,54 @@ test('the grey modes return one channel from the hue-shifted colour', () => {
   assert.deepEqual([...data], [0])
   const colour = filterPixels(Uint8Array.from([10, 20, 30]), { ...base, curve: [[0, 255], [255, 255]] })
   assert.deepEqual([...colour.data], [255, 255, 255])
+})
+
+const cave = '#4a5248'
+const wall = '#1c1a18'
+const pick = (color: string, subtract = false) => ({ color, subtract })
+
+test('OKLab puts white at 100 and black at 0', () => {
+  assert.ok(Math.abs(oklab(255, 255, 255)[0] - 100) < 0.01)
+  assert.equal(oklab(0, 0, 0)[0], 0)
+  assert.deepEqual(hexToRgb('#4a5248'), [74, 82, 72])
+  assert.equal(rgbToHex(74, 82, 72), '#4a5248')
+})
+
+test('a selection takes its sample fully and fades out within the fuzziness', () => {
+  const weigh = selectionWeigher({ ...NEW_SELECTION, samples: [pick(cave)], fuzziness: 10 })
+  assert.equal(weigh(...oklab(...hexToRgb(cave))), 1)
+  assert.equal(weigh(...oklab(...hexToRgb(wall))), 0)
+  const near = weigh(...oklab(80, 86, 76))
+  assert.ok(near > 0 && near < 1, `${near}`)
+})
+
+test('subtracting samples take their colours back out', () => {
+  const weigh = selectionWeigher({ ...NEW_SELECTION, samples: [pick(cave), pick('#505a4e', true)], fuzziness: 20 })
+  assert.equal(weigh(...oklab(0x50, 0x5a, 0x4e)), 0)
+  assert.ok(weigh(...oklab(...hexToRgb(cave))) < 1)
+  assert.equal(selectionWeigher({ ...NEW_SELECTION, samples: [pick(cave, true)] })(...oklab(...hexToRgb(cave))), 0)
+})
+
+test('lightening a picked colour turns it white in B&W while the walls stay black', () => {
+  const pixels = Uint8Array.from([...hexToRgb(cave), ...hexToRgb(wall)])
+  const filter: Filter = { ...base, mode: 'threshold', amount: 0.5, selections: [{ ...NEW_SELECTION, samples: [pick(cave)], amount: 0.6 }] }
+  assert.deepEqual([...filterPixels(Uint8Array.from(pixels), filter).data], [255, 0])
+  assert.deepEqual([...filterPixels(Uint8Array.from(pixels), { ...filter, selections: [] }).data], [0, 0])
+})
+
+test('a selection curve changes the selected pixels only, and selections stack in order', () => {
+  const curve: [number, number][] = [[0, 128], [255, 255]]
+  const filter: Filter = { ...base, mode: 'grey', selections: [{ ...NEW_SELECTION, samples: [pick(cave)], curve }, { ...NEW_SELECTION, samples: [pick(cave)], amount: -1 }] }
+  const out = filterPixels(Uint8Array.from([...hexToRgb(cave), ...hexToRgb(wall)]), filter).data
+  assert.equal(out[0], 0)
+  assert.equal(out[1], greyOf(...hexToRgb(wall)))
+  const first = filterPixels(Uint8Array.from(hexToRgb(cave)), { ...filter, selections: filter.selections.slice(0, 1) }).data
+  assert.ok(first[0] > 128)
+})
+
+test('the same colour gets the same weight wherever it is', () => {
+  const pixels = Uint8ClampedArray.from([...hexToRgb(cave), 255, ...hexToRgb(wall), 255, ...hexToRgb(cave), 255])
+  const [w] = selectionWeights(pixels, 4, [{ ...NEW_SELECTION, samples: [pick('#4c5449')] }])
+  assert.equal(w[0], w[2])
+  assert.equal(w[1], 0)
 })

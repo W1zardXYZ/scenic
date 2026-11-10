@@ -1,9 +1,11 @@
-import { useId, useMemo, useRef, useState } from 'react'
-import { ChevronRight, Plus, RotateCcw, X } from 'lucide-react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { ArrowDown, ArrowUp, ChevronRight, Pipette, Plus, RotateCcw, X } from 'lucide-react'
 import {
-  type Band, BAND_PRESETS, CURVE_PRESETS, curveFunction, curveInputs, HUES, isStraight, MAX_BANDS, MAX_CURVE_POINTS, NO_HUES, STRAIGHT,
+  type Band, BAND_PRESETS, CURVE_PRESETS, curveFunction, curveInputs, FUZZINESS, greyOf, HUES, isStraight, MAX_BANDS, MAX_CURVE_POINTS, MAX_SAMPLES,
+  MAX_SELECTIONS, NEW_SELECTION, NO_HUES, type Selection, selectionWeights, STRAIGHT,
 } from '../../shared/tone.ts'
-import { IconButton, NumberField, Segmented, SliderField } from '@/components/controls'
+import { ColorWell, IconButton, NumberField, Segmented, SliderField, SwitchRow } from '@/components/controls'
+import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -11,6 +13,7 @@ import { cn } from '@/lib/utils'
 import { Histogram, useHistogram } from './histogram.tsx'
 import type { Filter } from './types.ts'
 import { useDraft } from './use-draft.ts'
+import { pixelsOf } from './use-prepared-image.ts'
 
 type Point = [number, number]
 type SetFilter = React.Dispatch<React.SetStateAction<Filter>>
@@ -37,8 +40,16 @@ function addPoint(curve: Point[], x: number, y: number): { curve: Point[]; index
 
 const pointName = (i: number, count: number) => (i === 0 ? 'Dark end' : i === count - 1 ? 'Light end' : `Point ${i}`)
 
-function CurveEditor({ bins, filter, setFilter }: { bins: Uint32Array | null; filter: Filter; setFilter: SetFilter }) {
-  const [curve, commit] = useDraft(filter.curve, (next) => setFilter((f) => ({ ...f, curve: next })))
+/** A brightness curve over the histogram of the tones it acts on. */
+function CurveEditor({ label, value, onChange, bins, presets = true }: {
+  label: string
+  value: Point[]
+  onChange: (curve: Point[]) => void
+  /** Counts of the tones that reach the curve; null while they load. */
+  bins: ArrayLike<number> | null
+  presets?: boolean
+}) {
+  const [curve, commit] = useDraft(value, onChange)
   // Pointer events can arrive before the next render; they work on the newest curve.
   const latest = useRef(curve)
   latest.current = curve
@@ -55,17 +66,6 @@ function CurveEditor({ bins, filter, setFilter }: { bins: Uint32Array | null; fi
     const f = curveFunction(curve)
     return Array.from({ length: 256 }, (_, x) => `${x ? 'L' : 'M'}${x} ${(255 - f(x)).toFixed(2)}`).join('')
   }, [curve])
-  // The tones that reach the curve, after levels and ranges, so the points line up with what they change.
-  const inputs = useMemo(() => {
-    if (!bins) return null
-    const into = curveInputs(filter)
-    const counts = new Uint32Array(256)
-    bins.forEach((n, v) => {
-      counts[Math.round(into[v])] += n
-    })
-    return counts
-  }, [bins, filter])
-
   const focusPoint = (i: number) => setTimeout(() => area.current?.querySelector<HTMLElement>(`[data-point="${i}"]`)?.focus())
   const select = (i: number) => {
     setActive(i)
@@ -135,12 +135,12 @@ function CurveEditor({ bins, filter, setFilter }: { bins: Uint32Array | null; fi
   const same = (a: Point[], b: Point[]) => a.length === b.length && a.every((p, i) => p[0] === b[i][0] && p[1] === b[i][1])
 
   return (
-    <div className="flex flex-col gap-3" role="group" aria-label="Curve">
+    <div className="flex flex-col gap-3" role="group" aria-label={label}>
       <div className="flex items-center justify-between gap-3">
-        <span className={LABEL}>Curve</span>
+        <span className={LABEL}>{label}</span>
         <div className="-my-2 flex">
-          <IconButton label="Add a point" icon={Plus} disabled={curve.length >= MAX_CURVE_POINTS} onClick={addInGap} />
-          <IconButton label="Reset curve" icon={RotateCcw} disabled={curve.length === 2 && isStraight(curve)} onClick={() => { apply(STRAIGHT); setActive(0) }} />
+          <IconButton label={`Add a point to the ${label.toLowerCase()}`} icon={Plus} disabled={curve.length >= MAX_CURVE_POINTS} onClick={addInGap} />
+          <IconButton label={`Reset the ${label.toLowerCase()}`} icon={RotateCcw} disabled={curve.length === 2 && isStraight(curve)} onClick={() => { apply(STRAIGHT); setActive(0) }} />
         </div>
       </div>
 
@@ -155,7 +155,7 @@ function CurveEditor({ bins, filter, setFilter }: { bins: Uint32Array | null; fi
           onPointerCancel={onPointerUp}
         >
           <div className="absolute inset-0 overflow-hidden rounded-sm opacity-60">
-            {inputs ? <Histogram bins={inputs} /> : <Skeleton className="absolute inset-0" />}
+            {bins ? <Histogram bins={bins} /> : <Skeleton className="absolute inset-0" />}
           </div>
           <svg viewBox="0 0 255 255" preserveAspectRatio="none" aria-hidden="true" className="pointer-events-none absolute inset-0 size-full">
             <path d="M63.75 0V255M127.5 0V255M191.25 0V255M0 63.75H255M0 127.5H255M0 191.25H255" className="stroke-foreground/10" vectorEffect="non-scaling-stroke" />
@@ -209,13 +209,13 @@ function CurveEditor({ bins, filter, setFilter }: { bins: Uint32Array | null; fi
         />
       </div>
 
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Curve presets">
+      {presets && <div className="flex flex-wrap gap-2" role="group" aria-label={`${label} presets`}>
         {CURVE_PRESETS.map(([name, points]) => (
           <Button key={name} variant="outline" size="sm" aria-pressed={same(curve, points)} onClick={() => { apply(points); setActive(0) }} className="aria-pressed:bg-accent">
             {name}
           </Button>
         ))}
-      </div>
+      </div>}
     </div>
   )
 }
@@ -334,11 +334,196 @@ function HuesControl({ filter, setFilter }: { filter: Filter; setFilter: SetFilt
 /** Curve, tone ranges and colour ranges: the Photoshop-style controls next to the ink settings. */
 export function ToneControl({ src, filter, setFilter }: { src: string; filter: Filter; setFilter: SetFilter }) {
   const bins = useHistogram(src)
+  // The tones that reach the curve, after levels and ranges, so the points line up with what they change.
+  const inputs = useMemo(() => {
+    if (!bins) return null
+    const into = curveInputs(filter)
+    const counts = new Uint32Array(256)
+    bins.forEach((n, v) => {
+      counts[Math.round(into[v])] += n
+    })
+    return counts
+  }, [bins, filter])
+  const setCurve = useCallback((curve: Point[]) => setFilter((f) => ({ ...f, curve })), [setFilter])
   return (
     <>
-      <CurveEditor bins={bins} filter={filter} setFilter={setFilter} />
+      <CurveEditor label="Curve" value={filter.curve} onChange={setCurve} bins={inputs} />
       <BandsControl filter={filter} setFilter={setFilter} />
       <HuesControl filter={filter} setFilter={setFilter} />
     </>
+  )
+}
+
+/** Every so many pixels is plenty for a histogram. */
+const HISTOGRAM_STEP = 3
+
+/** Grey values of the pixels a selection picks, each counted by how much it belongs. */
+function useSelectionHistogram(src: string, selection: Selection | undefined): Float64Array | null {
+  const [bins, setBins] = useState<{ key: string; counts: Float64Array } | null>(null)
+  const key = selection ? JSON.stringify([src, selection.samples, selection.fuzziness]) : ''
+  useEffect(() => {
+    if (!key || !selection) return
+    let stopped = false
+    const timer = setTimeout(async () => {
+      const { data } = await pixelsOf(src)
+      if (stopped) return
+      const sample = new Uint8Array(Math.ceil(data.length / 4 / HISTOGRAM_STEP) * 3)
+      for (let i = 0, j = 0; i < data.length; i += 4 * HISTOGRAM_STEP, j += 3) sample.set(data.subarray(i, i + 3), j)
+      const [weights] = selectionWeights(sample, 3, [selection])
+      const counts = new Float64Array(256)
+      for (let j = 0; j < weights.length; j++) if (weights[j]) counts[greyOf(sample[j * 3], sample[j * 3 + 1], sample[j * 3 + 2])] += weights[j]
+      setBins({ key, counts })
+    }, 120)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
+  }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  return bins?.key === key ? bins.counts : null
+}
+
+const HEX = /^#?([0-9a-f]{6})$/i
+
+/** Adds a sample by typing or choosing a colour, for keyboards and exact values. */
+function SampleInput({ add, full }: { add: (color: string, subtract: boolean) => void; full: boolean }) {
+  const [text, setText] = useState('#808080')
+  const id = useId()
+  const match = HEX.exec(text.trim())
+  const color = match ? `#${match[1].toLowerCase()}` : null
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-xs text-muted-foreground">Colour by value</label>
+      <div className="flex items-center gap-2">
+        <ColorWell label="Choose a colour" value={color ?? '#808080'} onChange={setText} />
+        <Input id={id} value={text} onChange={(e) => setText(e.target.value)} aria-invalid={!color} spellCheck={false} className="min-w-0 flex-1 font-mono" />
+        <Button variant="outline" size="sm" disabled={!color || full} onClick={() => add(color!, false)}>Add</Button>
+        <Button variant="outline" size="sm" disabled={!color || full} onClick={() => add(color!, true)}>Take out</Button>
+      </div>
+    </div>
+  )
+}
+
+/** Photoshop's Select → Color Range: pick colours on the map, then change the brightness of just those pixels. */
+export function SelectionsControl({ src, filter, setFilter, active, setActive, showMask, setShowMask, pick }: {
+  src: string
+  filter: Filter
+  setFilter: SetFilter
+  active: number
+  setActive: (index: number) => void
+  showMask: boolean
+  setShowMask: (show: boolean) => void
+  pick: () => void
+}) {
+  const { selections } = filter
+  const index = Math.min(active, selections.length - 1)
+  const current = selections[index] as Selection | undefined
+  const bins = useSelectionHistogram(src, current)
+  const box = useRef<HTMLDivElement>(null)
+
+  const setSelections = (change: (list: Selection[]) => Selection[]) => setFilter((f) => ({ ...f, selections: change(f.selections) }))
+  const change = (patch: Partial<Selection>) => setSelections((list) => list.map((s, i) => (i === index ? { ...s, ...patch } : s)))
+  const setCurve = useCallback((curve: Point[]) => setFilter((f) => ({ ...f, selections: f.selections.map((s, i) => (i === index ? { ...s, curve } : s)) })), [setFilter, index])
+  const add = () => {
+    setSelections((list) => [...list, NEW_SELECTION])
+    setActive(selections.length)
+    pick()
+  }
+  const move = (from: number, to: number) => {
+    setSelections((list) => {
+      const next = [...list]
+      ;[next[from], next[to]] = [next[to], next[from]]
+      return next
+    })
+    setActive(to)
+    setTimeout(() => box.current?.querySelector<HTMLElement>(`[data-selection="${to}"]`)?.focus())
+  }
+  const remove = (i: number) => {
+    setSelections((list) => list.filter((_, j) => j !== i))
+    setActive(Math.max(0, i - 1))
+    setTimeout(() => box.current?.querySelector<HTMLElement>('[data-selection], button')?.focus())
+  }
+  const addSample = (color: string, subtract: boolean) =>
+    change({ samples: [...(current?.samples ?? []), { color, subtract }].slice(0, MAX_SAMPLES) })
+
+  return (
+    <div ref={box} className="flex flex-col gap-4">
+      <p className="text-xs text-muted-foreground">
+        Pick colours on the map, then lighten or darken just those pixels. Colours are matched before any grey or B&amp;W conversion, so this works in every ink mode. Later selections apply on top of earlier ones.
+      </p>
+      <div className="flex gap-2">
+        <Button variant="outline" size="sm" onClick={pick} disabled={!current && selections.length >= MAX_SELECTIONS}>
+          <Pipette data-icon="inline-start" />Pick on the map
+        </Button>
+        <Button variant="outline" size="sm" onClick={add} disabled={selections.length >= MAX_SELECTIONS}>
+          <Plus data-icon="inline-start" />New selection
+        </Button>
+      </div>
+
+      {selections.length > 0 && (
+        <ul className="flex flex-col gap-1" aria-label="Selections, applied top to bottom">
+          {selections.map((s, i) => (
+            <li key={i} className={cn('flex items-center gap-1 rounded-lg pl-1', i === index && 'bg-input')}>
+              <button
+                type="button"
+                data-selection={i}
+                aria-pressed={i === index}
+                onClick={() => setActive(i)}
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-2 text-left text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring"
+              >
+                <span className="shrink-0">Selection {i + 1}</span>
+                <span className="flex min-w-0 gap-0.5 overflow-hidden" aria-hidden="true">
+                  {s.samples.map((x, j) => (
+                    <span key={j} className={cn('size-3 shrink-0 rounded-full ring-1 ring-foreground/15', x.subtract && 'opacity-40')} style={{ backgroundColor: x.color }} />
+                  ))}
+                </span>
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">{s.samples.length ? amountText(s.amount) : 'Nothing picked'}</span>
+              </button>
+              <IconButton label={`Move selection ${i + 1} up`} icon={ArrowUp} disabled={i === 0} onClick={() => move(i, i - 1)} className="shrink-0" />
+              <IconButton label={`Move selection ${i + 1} down`} icon={ArrowDown} disabled={i === selections.length - 1} onClick={() => move(i, i + 1)} className="shrink-0" />
+              <IconButton label={`Remove selection ${i + 1}`} icon={X} onClick={() => remove(i)} className="shrink-0" />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {current && (
+        <div className="flex flex-col gap-4" role="group" aria-label={`Selection ${index + 1}`}>
+          <div className="flex flex-col gap-2">
+            <span className={LABEL}>Colours in selection {index + 1}</span>
+            {current.samples.length ? (
+              <ul className="flex flex-wrap gap-1.5">
+                {current.samples.map((x, j) => (
+                  <li key={j} className="flex items-center gap-1.5 rounded-full bg-input py-0.5 pr-0.5 pl-1.5 text-xs">
+                    <span aria-hidden="true" className="size-4 rounded-full ring-1 ring-foreground/15" style={{ backgroundColor: x.color }} />
+                    <span className="font-mono">{x.subtract ? '− ' : ''}{x.color}</span>
+                    <IconButton
+                      label={`Remove ${x.subtract ? 'taken out ' : ''}colour ${x.color}`}
+                      icon={X}
+                      onClick={() => change({ samples: current.samples.filter((_, k) => k !== j) })}
+                      className="size-6"
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-muted-foreground">Nothing picked yet. Use the colour picker on the map: click to pick, Shift-click to add, Alt-click to take a colour out.</p>
+            )}
+            <SampleInput add={addSample} full={current.samples.length >= MAX_SAMPLES} />
+          </div>
+          <SliderField
+            label="Fuzziness"
+            value={current.fuzziness}
+            display={String(current.fuzziness)}
+            min={FUZZINESS.min}
+            max={FUZZINESS.max}
+            step={1}
+            onChange={(fuzziness) => change({ fuzziness })}
+          />
+          <SwitchRow label="Show the selection on the map" hint="Tints what is left out" checked={showMask} onCheckedChange={setShowMask} />
+          <SliderField label="Lighten or darken" value={current.amount} display={amountText(current.amount)} min={-1} max={1} step={0.05} onChange={(amount) => change({ amount })} />
+          <CurveEditor label="Selection curve" value={current.curve} onChange={setCurve} bins={bins} presets={false} />
+        </div>
+      )}
+    </div>
   )
 }
