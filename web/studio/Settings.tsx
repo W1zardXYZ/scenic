@@ -17,6 +17,7 @@ import { Toggle } from '@/components/ui/toggle'
 import { thumb } from '../api.ts'
 import type { Prefs } from '../filters.ts'
 import { LevelsControl } from './LevelsControl.tsx'
+import { SelectionsControl, ToneControl } from './ToneControl.tsx'
 import type { Filter, FilterMode, Fog, FogDraw, FogItem, FogPart, FogShape, Grid, Marks, Overlay, Tool } from './types.ts'
 
 const SQUARE_PRESETS = [[String(25.4), '1 inch'], ['25', '25 mm'], ['30', '30 mm'], ['32', '32 mm']] as const
@@ -117,7 +118,7 @@ function FogRow({ item, sq, selected, change, remove, select }: {
 
 export const Settings = memo(function Settings({
   map, grid, changeGrid, setPixelsPerSquare, lockAspect, setLockAspect, gridDirty, saveGrid, prefs, changeSpec, setPrefs, crop, plane, changeCrop, looseCount, automaticCount,
-  overlay, setOverlay, filter, setFilter, fadeMm, setFadeMm, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab,
+  overlay, setOverlay, filter, setFilter, fadeMm, setFadeMm, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab, activeSelection, setActiveSelection, showMask, setShowMask,
 }: {
   map: MapRecord
   grid: Grid
@@ -152,6 +153,10 @@ export const Settings = memo(function Settings({
   setTool: (tool: Tool) => void
   tab: string
   setTab: (tab: string) => void
+  activeSelection: number
+  setActiveSelection: (index: number) => void
+  showMask: boolean
+  setShowMask: (show: boolean) => void
 }) {
   const sq = prefs.squareMm
   const estimated = map.gridSource === 'guess' || map.gridSource === 'pattern'
@@ -315,6 +320,21 @@ export const Settings = memo(function Settings({
             {(filter.mode === 'grey' || filter.mode === 'threshold') && (
               <LevelsControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
             )}
+          </PanelGroup>
+          <PanelGroup title="Tone">
+            <ToneControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
+          </PanelGroup>
+          <PanelGroup title="Colour selections">
+            <SelectionsControl
+              src={thumb(map, 'large')}
+              filter={filter}
+              setFilter={setFilter}
+              active={activeSelection}
+              setActive={setActiveSelection}
+              showMask={showMask}
+              setShowMask={setShowMask}
+              pick={() => setTool('pick')}
+            />
           </PanelGroup>
           <PanelGroup title="Edges">
             <SliderField

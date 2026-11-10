@@ -1,59 +1,12 @@
-import { memo, startTransition, useEffect, useMemo, useState } from 'react'
 import { RotateCcw } from 'lucide-react'
 import { Slider as SliderPrimitive } from 'radix-ui'
-import { isNeutral, type Levels, NEUTRAL_LEVELS, toneCurve } from '../../shared/tone.ts'
+import { isNeutral, type Levels, NEUTRAL_LEVELS, printTable } from '../../shared/tone.ts'
 import { IconButton, NumberField } from '@/components/controls'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { Histogram, useHistogram } from './histogram.tsx'
 import type { Filter } from './types.ts'
-
-const SAMPLE_WIDTH = 400
-const cache = new Map<string, Uint32Array>()
-
-/** Luminance counts of an image, read from a small canvas copy and kept per image. */
-function useHistogram(src: string): Uint32Array | null {
-  const [bins, setBins] = useState(() => cache.get(src) ?? null)
-  useEffect(() => {
-    if (cache.has(src)) return setBins(cache.get(src)!)
-    let stopped = false
-    const image = new Image()
-    image.onload = () => {
-      if (stopped) return
-      const canvas = document.createElement('canvas')
-      canvas.width = SAMPLE_WIDTH
-      canvas.height = Math.max(1, Math.round((image.naturalHeight / image.naturalWidth) * SAMPLE_WIDTH))
-      const context = canvas.getContext('2d', { willReadFrequently: true })!
-      context.drawImage(image, 0, 0, canvas.width, canvas.height)
-      const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
-      const counts = new Uint32Array(256)
-      for (let i = 0; i < data.length; i += 4) counts[Math.round(0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2])]++
-      cache.set(src, counts)
-      setBins(counts)
-    }
-    image.src = src
-    return () => {
-      stopped = true
-    }
-  }, [src])
-  return bins
-}
-
-const Graph = memo(function Graph({ bins }: { bins: Uint32Array }) {
-  const path = useMemo(() => {
-    // A few spikes (pure black backgrounds) must not flatten everything else.
-    const peak = [...bins].sort((a, b) => a - b)[250] || 1
-    let d = 'M0 100'
-    bins.forEach((n, v) => {
-      d += `L${v} ${(100 - Math.min(1, n / peak) * 100).toFixed(1)}`
-    })
-    return `${d}L255 100Z`
-  }, [bins])
-  return (
-    <svg viewBox="0 0 255 100" preserveAspectRatio="none" aria-hidden="true" className="absolute inset-0 size-full">
-      <path d={path} className="fill-muted-foreground" />
-    </svg>
-  )
-})
+import { useDraft } from './use-draft.ts'
 
 const pct = (v: number) => `${(v / 255) * 100}%`
 const clamp = (n: number, low: number, high: number) => Math.min(high, Math.max(low, n))
@@ -76,11 +29,7 @@ export function LevelsControl({ src, filter, setFilter }: {
 }) {
   const bins = useHistogram(src)
   // The handles follow the pointer at once; the preview catches up when the browser is free.
-  const [levels, setLevels] = useState(filter.levels)
-  const apply = (next: Levels) => {
-    setLevels(next)
-    startTransition(() => setFilter((f) => ({ ...f, levels: next })))
-  }
+  const [levels, apply] = useDraft(filter.levels, (next) => setFilter((f) => ({ ...f, levels: next })))
 
   const mid = midpoint(levels)
   const onHandles = ([black, handle, white]: number[]) => {
@@ -88,21 +37,20 @@ export function LevelsControl({ src, filter, setFilter }: {
     else apply({ ...levels, gamma: gammaAt(handle, levels) })
   }
 
-  // The cut-off applies after the curve, so on this input axis it moves with the handles.
-  const threshold = filter.mode === 'threshold'
-  const cutoff = threshold ? toneCurve(levels).findIndex((v) => v >= filter.amount * 255) : -1
+  // The cut-off applies after levels, ranges and curve, so on this input axis it moves with them.
+  const cutoff = filter.mode === 'threshold' ? printTable({ ...filter, levels }).indexOf(255) : -1
 
   return (
     <div className="flex flex-col gap-3" role="group" aria-label="Levels">
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">Levels</span>
-        <IconButton label="Reset levels" icon={RotateCcw} disabled={isNeutral(levels)} onClick={() => apply(NEUTRAL_LEVELS)} className="-my-2 -mr-2" />
+        <IconButton label="Reset levels" icon={RotateCcw} disabled={isNeutral(levels)} onClick={() => apply(NEUTRAL_LEVELS)} className="-my-2" />
       </div>
 
       {/* Inset by half a handle, so a handle's centre lines up with its histogram value. */}
       <div className="px-1.5">
         <div className="relative h-20 overflow-hidden rounded-sm bg-input">
-          {bins ? <Graph bins={bins} /> : <Skeleton className="absolute inset-0" />}
+          {bins ? <Histogram bins={bins} /> : <Skeleton className="absolute inset-0" />}
           <div className="absolute inset-y-0 left-0 bg-card/70" style={{ width: pct(levels.black) }} />
           <div className="absolute inset-y-0 right-0 bg-card/70" style={{ width: `calc(100% - ${pct(levels.white)})` }} />
           {cutoff >= 0 && <div className="absolute inset-y-0 w-px bg-primary" style={{ left: pct(cutoff) }} />}
