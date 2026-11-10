@@ -9,7 +9,8 @@ import {
 } from '../shared/layout.ts'
 import { fadeMask, fadeRegion } from '../shared/fade.ts'
 import {
-  bakedFog, type Fog, type FogCard, type FogItem, type FogPart, type FogPlan, fogBounds, fogPath, fogPlan, inkOn, labelRoom, labelTone, touches,
+  bakedFog, type Fog, type FogCard, type FogItem, type FogPart, type FogPlan, fogBounds, fogPath, fogPlan, inkOn, labelRoom, labelTone, separateFog,
+  touches,
 } from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
 import { isNeutral, type Levels, toneCurve } from '../shared/tone.ts'
@@ -56,6 +57,25 @@ const isFogItem = (item: FogItem) => typeof item?.name === 'string' && item.name
   ['cover', 'show'].includes(item.mode) && Array.isArray(item.parts) && item.parts.length >= 1 && item.parts.length <= 100 &&
   item.parts.every((part) => typeof part?.subtract === 'boolean' && (part.box ? isRect(part.box) : isCurve(part.points)))
 
+const MAX_FOG_CARDS = 1000
+
+/**
+ * At most how many cards the separate fog splits into, worked out cheaply. A
+ * cover far larger than its paper would otherwise be split into millions of
+ * pieces before anything could refuse it.
+ */
+function fogCardBound(q: PrintRequest): number {
+  const covers = separateFog(q.fog)
+  if (!covers.length) return 0
+  const paper = PAPERS.find((p) => p.id === q.fog.paper) ?? { w: q.pages[0].sheetW, h: q.pages[0].sheetH }
+  const step = Math.min(paper.w, paper.h) - q.marginMm * 2 - FOG_TAB_MM
+  if (step < 1) return Infinity
+  return covers.reduce((n, item) => {
+    const { w, h } = fogBounds(item)
+    return n + Math.max(1, Math.ceil(w / step)) * Math.max(1, Math.ceil(h / step))
+  }, 0)
+}
+
 /** Everything here arrives from the browser and ends up in sharp, SVG or a PDF. */
 export function validatePrint(q: PrintRequest): string | null {
   if (!finite(q?.mapId, 1, 2 ** 53)) return 'mapId'
@@ -73,6 +93,7 @@ export function validatePrint(q: PrintRequest): string | null {
     !['undefined', 'boolean'].includes(typeof q.fog.names) || (q.fog.paper !== undefined && !PAPERS.some((p) => p.id === q.fog.paper))) return 'fog'
   if (q.crop && !isRect(q.crop)) return 'crop'
   if (q.fadeMm !== undefined && !finite(q.fadeMm, 0, 200)) return 'fade'
+  if (fogCardBound(q) > MAX_FOG_CARDS) return 'fog size'
   if (!q.output || !['pdf', 'png'].includes(q.output.format) || !(q.output.quality in MAX_PPI)) return 'output'
   return null
 }
@@ -352,8 +373,10 @@ function bakedSvg(q: PrintRequest, region: Rect): string | null {
 /** The mark is what gets matched against the placement page, so it leads; the name confirms it. */
 /** A card's ID, small along the bottom of the shape so it reads on the table without drawing the eye; its name only when asked for. */
 function cardLabels(q: PrintRequest, card: FogCard): Label[] {
-  // Inside the shape within this piece: a label off the shape would be cut away with the paper.
-  const box = labelRoom(card.item, card.region) ?? card.region
+  // Inside the shape within this piece, and off its glue tabs: a label there would be cut away or covered by the next piece.
+  const { region: r, tabRight, tabBottom } = card
+  const clear = { ...r, w: r.w - (tabRight ? FOG_TAB_MM : 0), h: r.h - (tabBottom ? FOG_TAB_MM : 0) }
+  const box = labelRoom(card.item, clear) ?? clear
   const color = labelTone(q.fog.fill)
   const name = q.fog.names ? card.item.name.trim() : ''
   const room = box.w * 0.9
@@ -904,7 +927,7 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
 }
 
 /** Bump whenever the same request should print differently, so cached files from older layouts are not served. */
-const PRINT_LAYOUT = 4
+const PRINT_LAYOUT = 5
 
 export const printKey = (q: PrintRequest, file: FileRow) => `print|${PRINT_LAYOUT}|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
 
