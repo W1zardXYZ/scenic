@@ -49,6 +49,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const [overlay, setOverlay] = useState<Overlay>({ show: !map.hasGrid, color: '#000000', opacity: 0.35, widthMm: 0.2, numbering: false })
   const [filter, setFilter] = useState<Filter>({ mode: 'color', amount: 0.3, levels: NEUTRAL_LEVELS })
   const [marks, setMarks] = useState<Marks>({ cut: true, labels: true, overview: true })
+  const [fadeMm, setFadeMm] = useState(0)
   // Kept as a share of the map, so fog stays on the same spot when the scale changes.
   const [fogShare, setFogShare] = useState<Fog>(NEW_FOG)
   // Newest last: that one is what gets edited, and what new parts join.
@@ -181,13 +182,14 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   }, [fog, setFog])
 
   const { squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered } = prefs
-  const restore = useCallback(({ grid, overlay, filter, marks, fogShare, manual, cropShare, ...paper }: {
-    grid: Grid; overlay: Overlay; filter: Filter; marks: Marks; fogShare: Fog; manual: LabeledPage[] | null; cropShare: Rect | null
+  const restore = useCallback(({ grid, overlay, filter, marks, fadeMm, fogShare, manual, cropShare, ...paper }: {
+    grid: Grid; overlay: Overlay; filter: Filter; marks: Marks; fadeMm: number; fogShare: Fog; manual: LabeledPage[] | null; cropShare: Rect | null
   } & Pick<Prefs, 'squareMm' | 'paperId' | 'orientation' | 'marginMm' | 'overlapMm' | 'seamsOnGrid' | 'centered'>) => {
     setGrid(grid)
     setOverlay(overlay)
     setFilter(filter)
     setMarks(marks)
+    setFadeMm(fadeMm)
     setFogShare(fogShare)
     setManual(manual)
     setCropShare(cropShare)
@@ -196,8 +198,8 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     setSaved(false)
   }, [setPrefs])
   const { undo, redo, canUndo, canRedo } = useHistory(
-    useMemo(() => ({ grid, overlay, filter, marks, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered }),
-      [grid, overlay, filter, marks, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered]),
+    useMemo(() => ({ grid, overlay, filter, marks, fadeMm, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered }),
+      [grid, overlay, filter, marks, fadeMm, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered]),
     restore,
   )
 
@@ -218,7 +220,9 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     fog,
     output,
     ...(crop && { crop }),
-  }), [map.id, sq, prefs.marginMm, grid, overlay, pages, filter, marks, fog, output, crop])
+    // Left out when off, so prints made before fading existed keep their cache entries.
+    ...(fadeMm > 0 && { fadeMm }),
+  }), [map.id, sq, prefs.marginMm, grid, overlay, pages, filter, marks, fog, output, crop, fadeMm])
   const requestKey = useMemo(() => JSON.stringify(request), [request])
   const ready = result?.key === requestKey ? result : null
 
@@ -295,6 +299,8 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
       setOverlay={setOverlay}
       filter={filter}
       setFilter={setFilter}
+      fadeMm={fadeMm}
+      setFadeMm={setFadeMm}
       marks={marks}
       setMarks={setMarks}
       fog={fog}
@@ -403,6 +409,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
           sq={sq}
           overlay={overlay}
           filter={filter}
+          fadeMm={fadeMm}
           fog={fog}
           pages={pages}
           automatic={automatic}

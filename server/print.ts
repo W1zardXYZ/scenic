@@ -6,6 +6,7 @@ import yazl from 'yazl'
 import {
   FOG_TAB_MM, fogPieces, gridSegments, hexNumbers, intersect, type Page, type Rect, type Segment,
 } from '../shared/layout.ts'
+import { fadeMask, fadeRegion } from '../shared/fade.ts'
 import { bakedFog, type Fog, type FogItem, type FogPart, fogBounds, fogPath, inkOn, separateFog, touches } from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
 import { isNeutral, type Levels, toneCurve } from '../shared/tone.ts'
@@ -21,6 +22,8 @@ const JPEG_QUALITY = { high: 92, balanced: 82, small: 68 }
 const PARALLEL_TILES = 3
 /** Fog is flat colour and thin lines, so it needs no more than this however sharp the map is. */
 const FOG_PX_PER_MM = 200 / 25.4
+/** The fade is a slow ramp, so 100 ppi is already finer than any step in it could show. */
+const FADE_PX_PER_MM = 100 / 25.4
 
 export type LabeledPage = Page & { label: string }
 
@@ -36,6 +39,8 @@ export interface PrintRequest {
   fog: Fog
   /** Prints only this part of the map, in mm on the map plane. */
   crop?: Rect
+  /** Width of the band over which the printed area's outer edge fades to white; absent or 0 is off. */
+  fadeMm?: number
   output: { format: 'pdf' | 'png'; quality: keyof typeof MAX_PPI }
 }
 
@@ -62,6 +67,7 @@ export function validatePrint(q: PrintRequest): string | null {
   if (!q.marks) return 'marks'
   if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill)) return 'fog'
   if (q.crop && !isRect(q.crop)) return 'crop'
+  if (q.fadeMm !== undefined && !finite(q.fadeMm, 0, 200)) return 'fade'
   if (!q.output || !['pdf', 'png'].includes(q.output.format) || !(q.output.quality in MAX_PPI)) return 'output'
   return null
 }
@@ -280,6 +286,24 @@ function pieceLayer(q: PrintRequest, fog: ReturnType<typeof fogSheets>[number], 
   return rasterSvg(pieceSvg(q, fog, pad), fog.region.w + pad * 2, fog.region.h + pad * 2, pxPerMm)
 }
 
+/**
+ * The white veil over map and grid on `area` of the map plane, as a PNG, or
+ * null when none of it is veiled. Past the faded edge it is solid, which also
+ * hides the grid on blank paper and the sliver of whole source pixels a tile
+ * can overhang a crop by. Fog goes on top, so it stays whole.
+ */
+async function fadeLayer(q: PrintRequest, area: Rect, pxPerMm: number): Promise<Buffer | null> {
+  const region = q.fadeMm ? fadeRegion(q.grid.cols * q.squareMm, q.grid.rows * q.squareMm, q.crop) : null
+  if (!region) return null
+  const width = Math.max(1, Math.round(area.w * pxPerMm))
+  const height = Math.max(1, Math.round(area.h * pxPerMm))
+  const alpha = fadeMask(region, q.fadeMm!, area, width, height)
+  if (!alpha) return null
+  const pixels = Buffer.alloc(width * height * 4, 255)
+  for (let i = 0; i < alpha.length; i++) pixels[i * 4 + 3] = alpha[i]
+  return sharp(pixels, { raw: { width, height, channels: 4 } }).png().toBuffer()
+}
+
 const stroke = (doc: PDFKit.PDFDocument, segments: Segment[]) => {
   for (const [a, b, c, d] of segments) doc.moveTo(a * MM, b * MM).lineTo(c * MM, d * MM)
   doc.stroke()
@@ -354,6 +378,9 @@ async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: 
 
   const preview = await sharp(thumbPath(file.id, 'large')).jpeg({ quality: 80 }).toBuffer()
   doc.image(preview, ox * MM, oy * MM, { width: mapW * scale * MM, height: mapH * scale * MM })
+  // The whole map, so that outside a crop it is as blank as the sheets will be.
+  const fade = await fadeLayer(q, { x: 0, y: 0, w: mapW, h: mapH }, FADE_PX_PER_MM * scale)
+  if (fade) doc.image(fade, ox * MM, oy * MM, { width: mapW * scale * MM, height: mapH * scale * MM })
   const fog = await bakedLayer(q, { x: 0, y: 0, w: mapW, h: mapH }, FOG_PX_PER_MM * scale)
   if (fog) doc.image(fog, ox * MM, oy * MM, { width: mapW * scale * MM, height: mapH * scale * MM })
   for (const p of q.pages) {
@@ -389,6 +416,8 @@ async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: 
       doc.restore()
     }
     drawPdfOverlay(doc, q, sheet, overlayFor(q, file, sheet), title)
+    const fade = await fadeLayer(q, sheet.page, FADE_PX_PER_MM)
+    if (fade) doc.image(fade, sheet.left * MM, sheet.top * MM, { width: sheet.page.w * MM, height: sheet.page.h * MM })
     const fog = await bakedLayer(q, sheet.page, FOG_PX_PER_MM)
     if (fog) doc.image(fog, sheet.left * MM, sheet.top * MM, { width: sheet.page.w * MM, height: sheet.page.h * MM })
     progress(++done)
@@ -447,6 +476,8 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
       .png()
       .toBuffer()
     layers.push({ input: svg })
+    const fade = await fadeLayer(q, sheet.page, pxPerMm)
+    if (fade) layers.push({ input: fade, left: Math.round(sheet.left * pxPerMm), top: Math.round(sheet.top * pxPerMm) })
     const fog = await bakedLayer(q, sheet.page, pxPerMm)
     if (fog) layers.push({ input: fog, left: Math.round(sheet.left * pxPerMm), top: Math.round(sheet.top * pxPerMm) })
     return sharp({ create: { width, height, channels: 3, background: '#ffffff' } }).composite(layers).png({ compressionLevel: 6 }).toBuffer()

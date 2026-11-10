@@ -1,5 +1,6 @@
 import { memo, useRef } from 'react'
 import { ChevronRight, CloudFog, Crop, Eye, Lasso, Link2, Link2Off, PenTool, Ruler, Save, X } from 'lucide-react'
+import { FADE_MAX_MM } from '../../shared/fade.ts'
 import { circleCurve, withoutPart } from '../../shared/fog.ts'
 import { gridCandidates, PAPERS, type Plane, type Rect } from '../../shared/layout.ts'
 import type { MapRecord } from '../../shared/types.ts'
@@ -115,7 +116,7 @@ function FogRow({ item, sq, selected, change, remove, select }: {
 
 export const Settings = memo(function Settings({
   map, grid, changeGrid, setPixelsPerSquare, lockAspect, setLockAspect, gridDirty, saveGrid, prefs, changeSpec, setPrefs, crop, plane, changeCrop, looseCount, automaticCount,
-  overlay, setOverlay, filter, setFilter, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab,
+  overlay, setOverlay, filter, setFilter, fadeMm, setFadeMm, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab,
 }: {
   map: MapRecord
   grid: Grid
@@ -137,6 +138,8 @@ export const Settings = memo(function Settings({
   setOverlay: (overlay: Overlay) => void
   filter: Filter
   setFilter: React.Dispatch<React.SetStateAction<Filter>>
+  fadeMm: number
+  setFadeMm: (fadeMm: number) => void
   marks: Marks
   setMarks: (marks: Marks) => void
   fog: Fog
@@ -311,6 +314,18 @@ export const Settings = memo(function Settings({
             {(filter.mode === 'grey' || filter.mode === 'threshold') && (
               <LevelsControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
             )}
+          </PanelGroup>
+          <PanelGroup title="Edges">
+            <SliderField
+              label="Fade to paper"
+              value={fadeMm}
+              display={fadeMm ? `${fadeMm} mm` : 'Off'}
+              min={0}
+              max={FADE_MAX_MM}
+              step={1}
+              onChange={setFadeMm}
+            />
+            <p className="text-xs text-muted-foreground">Dissolves the outer edge of {crop ? 'the print area' : 'the map'} into the white of the paper and saves ink on dark maps. Seams between sheets are not faded.</p>
           </PanelGroup>
         </TabsContent>
 
