@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Download, ExternalLink, RotateCcw, SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  columnsOf, fogPieces, generatePages, generatePagesIn, pageLabel, PAPERS, type Plane, type Rect,
+  columnsOf, generatePages, generatePagesIn, pageLabel, PAPERS, type Plane, type Rect,
 } from '../shared/layout.ts'
-import { type FogItem, type FogPart, type FogShape, fogBounds, NEW_FOG, scaleFog, separateFog } from '../shared/fog.ts'
+import { type FogItem, type FogPart, type FogShape, fogPlan, NEW_FOG, scaleFog } from '../shared/fog.ts'
 import type { Library, MapRecord } from '../shared/types.ts'
 import { NEUTRAL_LEVELS } from '../shared/tone.ts'
 import { AppBar } from '@/components/app-bar'
-import { GradeBadge, IconButton, Segmented } from '@/components/controls'
+import { GradeBadge, Hint, IconButton, Segmented } from '@/components/controls'
 import { Trail } from '@/components/trail'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -19,7 +19,7 @@ import { useHistory } from '@/hooks/use-history'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { announce } from './announce.ts'
-import { api, createPrint } from './api.ts'
+import { api, createPrint, type PrintFile } from './api.ts'
 import { type Index, grade, pageSpec, type Prefs } from './filters.ts'
 import { sceneScope } from './scope.ts'
 import { Canvas } from './studio/Canvas.tsx'
@@ -29,6 +29,8 @@ import type { Filter, Fog, FogCombine, FogDraw, Grid, LabeledPage, Marks, Overla
 const IN = 25.4
 
 const QUALITIES = [['high', 'Best quality'], ['balanced', 'Balanced'], ['small', 'Smallest file']] as const
+
+const PART_LABELS: Record<PrintFile['part'], string> = { overview: 'Overview', sheets: 'Map sheets', fog: 'Fog cards', all: 'PNG sheets' }
 
 export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }: {
   map: MapRecord
@@ -49,6 +51,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const [overlay, setOverlay] = useState<Overlay>({ show: !map.hasGrid, color: '#000000', opacity: 0.35, widthMm: 0.2, numbering: false })
   const [filter, setFilter] = useState<Filter>({ mode: 'color', amount: 0.3, levels: NEUTRAL_LEVELS })
   const [marks, setMarks] = useState<Marks>({ cut: true, labels: true, overview: true })
+  const [fadeMm, setFadeMm] = useState(0)
   // Kept as a share of the map, so fog stays on the same spot when the scale changes.
   const [fogShare, setFogShare] = useState<Fog>(NEW_FOG)
   // Newest last: that one is what gets edited, and what new parts join.
@@ -63,7 +66,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const [cropShare, setCropShare] = useState<Rect | null>(null)
   const [tool, setTool] = useState<Tool>('select')
   const [job, setJob] = useState<{ done: number; total: number } | null>(null)
-  const [result, setResult] = useState<{ url: string; key: string } | null>(null)
+  const [result, setResult] = useState<{ files: PrintFile[]; key: string } | null>(null)
   const [saved, setSaved] = useState(false)
   const [tab, setTab] = useState('scale')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -96,8 +99,11 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const fogCount = useMemo(() => {
     const reference = pages[0]
     if (!reference) return 0
-    return separateFog(fog).reduce((n, item) => n + fogPieces(fogBounds(item), reference.sheetW, reference.sheetH, prefs.marginMm, sq).length, 0)
-  }, [fog, pages, prefs.marginMm, sq])
+    // A PDF overview shows where the fog goes; otherwise the placement gets a page of its own.
+    const { sheets } = fogPlan(fog, reference.sheetW, reference.sheetH, prefs.marginMm, sq, crop)
+    const placement = marks.overview && output.format === 'pdf' ? 0 : 1
+    return sheets ? sheets + placement : 0
+  }, [crop, fog, pages, prefs.marginMm, sq, marks.overview, output.format])
   const looseCount = useMemo(() => {
     const loose = { ...spec, seamsOnGrid: false }
     return (crop ? generatePagesIn(crop, plane, loose) : generatePages(plane, loose)).length
@@ -181,13 +187,14 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   }, [fog, setFog])
 
   const { squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered } = prefs
-  const restore = useCallback(({ grid, overlay, filter, marks, fogShare, manual, cropShare, ...paper }: {
-    grid: Grid; overlay: Overlay; filter: Filter; marks: Marks; fogShare: Fog; manual: LabeledPage[] | null; cropShare: Rect | null
+  const restore = useCallback(({ grid, overlay, filter, marks, fadeMm, fogShare, manual, cropShare, ...paper }: {
+    grid: Grid; overlay: Overlay; filter: Filter; marks: Marks; fadeMm: number; fogShare: Fog; manual: LabeledPage[] | null; cropShare: Rect | null
   } & Pick<Prefs, 'squareMm' | 'paperId' | 'orientation' | 'marginMm' | 'overlapMm' | 'seamsOnGrid' | 'centered'>) => {
     setGrid(grid)
     setOverlay(overlay)
     setFilter(filter)
     setMarks(marks)
+    setFadeMm(fadeMm)
     setFogShare(fogShare)
     setManual(manual)
     setCropShare(cropShare)
@@ -196,8 +203,8 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     setSaved(false)
   }, [setPrefs])
   const { undo, redo, canUndo, canRedo } = useHistory(
-    useMemo(() => ({ grid, overlay, filter, marks, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered }),
-      [grid, overlay, filter, marks, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered]),
+    useMemo(() => ({ grid, overlay, filter, marks, fadeMm, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered }),
+      [grid, overlay, filter, marks, fadeMm, fogShare, manual, cropShare, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered]),
     restore,
   )
 
@@ -218,7 +225,9 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     fog,
     output,
     ...(crop && { crop }),
-  }), [map.id, sq, prefs.marginMm, grid, overlay, pages, filter, marks, fog, output, crop])
+    // Left out when off, so prints made before fading existed keep their cache entries.
+    ...(fadeMm > 0 && { fadeMm }),
+  }), [map.id, sq, prefs.marginMm, grid, overlay, pages, filter, marks, fog, output, crop, fadeMm])
   const requestKey = useMemo(() => JSON.stringify(request), [request])
   const ready = result?.key === requestKey ? result : null
 
@@ -228,14 +237,14 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     announce('Rendering started')
     let quarters = 0
     try {
-      const url = await createPrint(request, (done, total) => {
+      const files = await createPrint(request, (done, total) => {
         setJob({ done, total })
         const reached = Math.floor((done / total) * 4)
         if (reached > quarters && reached < 4) announce(`Rendering ${reached * 25}%`)
         quarters = reached
       })
       justCreated.current = true
-      setResult({ url, key: requestKey })
+      setResult({ files, key: requestKey })
       announce(`${output.format.toUpperCase()} ready`)
     } catch (e) {
       toast.error((e as Error).message)
@@ -295,6 +304,8 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
       setOverlay={setOverlay}
       filter={filter}
       setFilter={setFilter}
+      fadeMm={fadeMm}
+      setFadeMm={setFadeMm}
       marks={marks}
       setMarks={setMarks}
       fog={fog}
@@ -351,16 +362,33 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
 
   const action = ready ? (
         <>
-          <div className="flex gap-2">
-            {output.format === 'pdf' && (
-              <Button size="lg" className="flex-1" asChild>
-                <a ref={resultLink} href={ready.url} target="_blank" rel="noreferrer"><ExternalLink data-icon="inline-start" />Open PDF</a>
-              </Button>
-            )}
-            <Button size="lg" variant={output.format === 'pdf' ? 'secondary' : 'default'} className="flex-1" asChild>
-              <a ref={output.format === 'pdf' ? undefined : resultLink} href={`${ready.url}&download=1`} download><Download data-icon="inline-start" />Download</a>
+          {output.format === 'pdf' ? (
+            // One PDF per part, so the overview and fog cards can be skipped or printed on other paper.
+            <ul aria-label="PDFs" className="flex flex-col divide-y rounded-md border">
+              {ready.files.map((file, i) => (
+                <li key={file.part} className="flex items-center gap-1 py-1 pr-1 pl-3">
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    <span className="font-medium">{PART_LABELS[file.part]}</span>
+                    <span className="text-muted-foreground"> · {file.pages} {file.pages === 1 ? 'page' : 'pages'}</span>
+                  </span>
+                  <Button size="sm" variant="ghost" asChild>
+                    <a ref={i === 0 ? resultLink : undefined} href={file.url} target="_blank" rel="noreferrer" aria-label={`Open ${PART_LABELS[file.part]} PDF`}>
+                      <ExternalLink data-icon="inline-start" />Open
+                    </a>
+                  </Button>
+                  <Hint label={`Download ${PART_LABELS[file.part]}`}>
+                    <Button size="icon" variant="ghost" asChild>
+                      <a href={`${file.url}&download=1`} download aria-label={`Download ${PART_LABELS[file.part]} PDF`}><Download /></a>
+                    </Button>
+                  </Hint>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Button size="lg" className="w-full" asChild>
+              <a ref={resultLink} href={`${ready.files[0].url}&download=1`} download><Download data-icon="inline-start" />Download</a>
             </Button>
-          </div>
+          )}
           {!short && <p className="text-xs text-muted-foreground">Print at 100% / actual size, with “fit to page” off.</p>}
         </>
       ) : (
@@ -403,6 +431,7 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
           sq={sq}
           overlay={overlay}
           filter={filter}
+          fadeMm={fadeMm}
           fog={fog}
           pages={pages}
           automatic={automatic}

@@ -18,7 +18,7 @@ import { projectKey } from '../shared/types.ts'
 import type { GridType, MapEdit } from '../shared/types.ts'
 import { db, getFile, hideScene, libraryVersion, markChanged, type ProfileKind, readLibrary, writeEdit, writeProfile } from './db.ts'
 import { exportMap, exportName, exportZip, type ExportFormat, FORMATS, safeName } from './export.ts'
-import { generate, type PrintRequest, validatePrint } from './print.ts'
+import { generate, type PrintPart, type PrintRequest, validatePrint } from './print.ts'
 import { applyEdit, dissolveNode, failedFiles, flattenSingles, moveInto, moveNode, regroup, type TreeNode, saveGrid, scanStatus, startSchedule, startScan, thumbPath } from './scan.ts'
 import { cached, cachePath, clearPartialFiles, localImage } from './source.ts'
 
@@ -261,6 +261,8 @@ app.get('/api/export-zip', (c) => {
 })
 
 /** Streams progress as JSON lines, ending with the finished file's token. */
+const PART_NAMES: Record<PrintPart, string> = { overview: 'overview', sheets: 'map sheets', fog: 'fog cards', all: 'print' }
+
 app.post('/api/print', async (c) => {
   const q = await c.req.json<PrintRequest>()
   const invalid = validatePrint(q)
@@ -273,8 +275,14 @@ app.post('/api/print', async (c) => {
     async start(controller) {
       const send = (value: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`))
       try {
-        const path = await generate(q, file, (done) => send({ done, total: q.pages.length }))
-        send({ url: `/api/print/${basename(path)}?name=${encodeURIComponent(safeName(file.name))}` })
+        const files = await generate(q, file, (done) => send({ done, total: q.pages.length }))
+        send({
+          files: files.map(({ part, path, pages }) => ({
+            part,
+            pages,
+            url: `/api/print/${basename(path)}?name=${encodeURIComponent(`${safeName(file.name)} ${PART_NAMES[part]}`)}`,
+          })),
+        })
       } catch (error) {
         console.error('Print failed:', error)
         send({ error: String((error as Error).message ?? error) })
@@ -292,7 +300,7 @@ app.get('/api/print/:file', async (c) => {
   const info = await stat(path).catch(() => null)
   if (!info) return c.notFound()
   const pdf = name.endsWith('.pdf')
-  const download = `${c.req.query('name') || 'map'} print.${pdf ? 'pdf' : 'zip'}`
+  const download = `${c.req.query('name') || 'map print'}.${pdf ? 'pdf' : 'zip'}`
   c.header('content-type', pdf ? 'application/pdf' : 'application/zip')
   c.header('content-length', String(info.size))
   c.header('content-disposition', pdf && !c.req.query('download') ? 'inline' : attachment(download))

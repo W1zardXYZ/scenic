@@ -217,7 +217,7 @@ export function SliderField({ label, value, display, onChange, min, max, step }:
         <span>{label}</span>
         <output className="tabular-nums">{display ?? value}</output>
       </div>
-      <Slider aria-label={label} min={min} max={max} step={step} value={[value]} onValueChange={([next]) => onChange(next)} />
+      <Slider aria-label={label} aria-valuetext={display} min={min} max={max} step={step} value={[value]} onValueChange={([next]) => onChange(next)} />
     </Field>
   )
 }

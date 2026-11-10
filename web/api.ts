@@ -36,7 +36,13 @@ export const fullImage = (m: Pick<MapRecord, 'id' | 'mtime'>) => `/api/maps/${m.
 export const thumb = (m: Pick<MapRecord, 'id' | 'mtime'>, size: 'small' | 'large') => `/thumb/${m.id}/${size}?v=${Math.round(m.mtime)}`
 
 /** Runs a print job, reporting progress, and resolves with the finished file's URL. */
-export async function createPrint(request: object, progress: (done: number, total: number) => void): Promise<string> {
+export interface PrintFile {
+  part: 'overview' | 'sheets' | 'fog' | 'all'
+  pages: number
+  url: string
+}
+
+export async function createPrint(request: object, progress: (done: number, total: number) => void): Promise<PrintFile[]> {
   const response = await fetch('/api/print', send('POST', request))
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => null)
@@ -53,7 +59,7 @@ export async function createPrint(request: object, progress: (done: number, tota
     for (const line of lines) {
       const message = JSON.parse(line)
       if (message.error) throw new Error(message.error)
-      if (message.url) return message.url
+      if (message.files) return message.files
       progress(message.done, message.total)
     }
   }

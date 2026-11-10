@@ -154,6 +154,102 @@ export function fogPieces(area: Rect, sheetW: number, sheetH: number, marginMm: 
   }))
 }
 
+/** Space left between packed pieces: room for scissors, and for each outline's stroke. */
+export const PACK_GUTTER_MM = 4
+
+export interface Placement {
+  sheet: number
+  /** Top-left of the piece within the printable area. */
+  x: number
+  y: number
+  /** Turned a quarter clockwise, so it sits `h` wide and `w` tall. */
+  rotated: boolean
+}
+
+export interface Packing {
+  sheetW: number
+  sheetH: number
+  sheets: number
+  /** One per input size, in input order. */
+  placements: Placement[]
+}
+
+const overlaps = (a: Rect, b: Rect) =>
+  a.x < b.x + b.w - EPSILON && b.x < a.x + a.w - EPSILON && a.y < b.y + b.h - EPSILON && b.y < a.y + a.h - EPSILON
+const contains = (outer: Rect, inner: Rect) =>
+  inner.x >= outer.x - EPSILON && inner.y >= outer.y - EPSILON &&
+  inner.x + inner.w <= outer.x + outer.w + EPSILON && inner.y + inner.h <= outer.y + outer.h + EPSILON
+
+/** MaxRects bookkeeping: carves `used` out of every free rectangle and drops the ones another already holds. */
+function carve(free: Rect[], used: Rect): Rect[] {
+  const next: Rect[] = []
+  for (const f of free) {
+    if (!overlaps(f, used)) {
+      next.push(f)
+      continue
+    }
+    if (used.x > f.x + EPSILON) next.push({ x: f.x, y: f.y, w: used.x - f.x, h: f.h })
+    if (used.x + used.w < f.x + f.w - EPSILON) next.push({ x: used.x + used.w, y: f.y, w: f.x + f.w - used.x - used.w, h: f.h })
+    if (used.y > f.y + EPSILON) next.push({ x: f.x, y: f.y, w: f.w, h: used.y - f.y })
+    if (used.y + used.h < f.y + f.h - EPSILON) next.push({ x: f.x, y: used.y + used.h, w: f.w, h: f.y + f.h - used.y - used.h })
+  }
+  return next.filter((a, i) => !next.some((b, j) => j !== i && contains(b, a) && (!contains(a, b) || j < i)))
+}
+
+type Size = { w: number; h: number }
+
+/** Big pieces first, judged a few ways; whichever packs tightest wins. */
+const PACK_ORDERS: ((a: Size, b: Size) => number)[] = [
+  (a, b) => Math.max(b.w, b.h) - Math.max(a.w, a.h) || b.w * b.h - a.w * a.h,
+  (a, b) => b.w * b.h - a.w * a.h,
+  (a, b) => b.h - a.h || b.w - a.w,
+  (a, b) => b.w - a.w || b.h - a.h,
+]
+
+function packInto(sizes: Size[], byOrder: (a: Size, b: Size) => number, width: number, height: number, gutter: number) {
+  // Each piece claims its gutter on the right and below; the bin grows by one gutter to match.
+  const [binW, binH] = [width + gutter, height + gutter]
+  const bins: Rect[][] = []
+  const placements: Placement[] = new Array(sizes.length)
+  const order = sizes.map((s, i) => ({ w: s.w, h: s.h, i })).sort((a, b) => byOrder(a, b) || a.i - b.i)
+  type Spot = { score: number; bin: number; x: number; y: number; rotated: boolean }
+  const spotIn = (bin: number, w: number, h: number, best: Spot | null) => {
+    for (const f of bins[bin]) {
+      for (const rotated of [false, true]) {
+        const [pw, ph] = rotated ? [h + gutter, w + gutter] : [w + gutter, h + gutter]
+        if (pw > f.w + EPSILON || ph > f.h + EPSILON) continue
+        // Best short side fit: the snuggest corner leaves the most useful space behind.
+        const score = Math.min(f.w - pw, f.h - ph)
+        if (!best || score < best.score - EPSILON) best = { score, bin, x: f.x, y: f.y, rotated }
+      }
+    }
+    return best
+  }
+  for (const { w, h, i } of order) {
+    let best = bins.reduce<Spot | null>((found, _, bin) => spotIn(bin, w, h, found), null)
+    if (!best) {
+      bins.push([{ x: 0, y: 0, w: binW, h: binH }])
+      // Larger than a sheet either way round: it gets a sheet of its own and runs off the edge.
+      best = spotIn(bins.length - 1, w, h, null) ?? { score: 0, bin: bins.length - 1, x: 0, y: 0, rotated: false }
+    }
+    const [pw, ph] = best.rotated ? [h + gutter, w + gutter] : [w + gutter, h + gutter]
+    bins[best.bin] = carve(bins[best.bin], { x: best.x, y: best.y, w: pw, h: ph })
+    placements[i] = { sheet: best.bin, x: best.x, y: best.y, rotated: best.rotated }
+  }
+  return { sheets: bins.length, placements }
+}
+
+/**
+ * Packs pieces onto as few sheets as it can, turning them where that helps.
+ * Keeps the sheet the way round it was given unless the other way saves paper.
+ */
+export function packSheets(sizes: Size[], sheetW: number, sheetH: number, marginMm: number): Packing {
+  const tries = [[sheetW, sheetH], [sheetH, sheetW]].flatMap(([w, h]) => PACK_ORDERS.map((order) => ({
+    sheetW: w, sheetH: h, ...packInto(sizes, order, w - marginMm * 2, h - marginMm * 2, PACK_GUTTER_MM),
+  })))
+  return tries.reduce((best, next) => (next.sheets < best.sheets ? next : best))
+}
+
 export function sheetCount(plane: Plane, spec: PageSpec): number {
   return bestLayout(plane, spec).count
 }
@@ -189,6 +285,104 @@ export interface Rect {
 }
 
 export type Segment = [x1: number, y1: number, x2: number, y2: number]
+
+/** The whole sheet of paper on the map plane: the printed area sits centred on it. */
+export function paperOf(page: Page): Rect {
+  return { x: page.x - (page.sheetW - page.w) / 2, y: page.y - (page.sheetH - page.h) / 2, w: page.sheetW, h: page.sheetH }
+}
+
+/** What a sheet really shows: its printed area cut down to the image and the crop. */
+export function contentOf(page: Rect, image: Rect, crop?: Rect | null): Rect | null {
+  const shown = intersect(page, image)
+  return shown && crop ? intersect(shown, crop) : shown
+}
+
+export type Side = 'top' | 'right' | 'bottom' | 'left'
+
+export interface Edge {
+  side: Side
+  /**
+   * Sheets join by overlapping, so each needs only two cuts: an edge facing an
+   * earlier sheet (or the outside of the map) is cut, and an edge facing a later
+   * sheet keeps its margin for that sheet's cut edge to lie on.
+   */
+  action: 'cut' | 'keep'
+  /** Index of the sheet across this edge, or -1 on the map's outer edge. */
+  neighbour: number
+  /** The join line: the cut itself, or on a kept edge the neighbour's cut, which lies inside this sheet when sheets overlap. */
+  at: number
+  /** How far the two sheets' content overlaps across this edge. */
+  overlap: number
+}
+
+export interface SheetPlan {
+  content: Rect
+  /** Top, right, bottom, left. */
+  edges: Edge[]
+}
+
+/**
+ * How much of the other axis `next` shares with `prev` if it continues it along
+ * `axis` (starts inside `prev` or right at its end), else 0.
+ */
+function follows(prev: Rect, next: Rect, axis: 'x' | 'y'): number {
+  const [p, n] = axis === 'x' ? [prev, next] : [swapRect(prev), swapRect(next)]
+  if (n.x <= p.x + EPSILON || n.x > p.x + p.w + EPSILON) return 0
+  const shared = Math.min(p.y + p.h, n.y + n.h) - Math.max(p.y, n.y)
+  return shared > EPSILON ? shared : 0
+}
+
+/** The sheet that shares the longest stretch of edge, or -1. */
+function closest(contents: (Rect | null)[], skip: number, shared: (other: Rect) => number): number {
+  let best = -1
+  let most = 0
+  contents.forEach((other, j) => {
+    const length = other && j !== skip ? shared(other) : 0
+    if (length > most + EPSILON) [best, most] = [j, length]
+  })
+  return best
+}
+
+/**
+ * Which edges of each sheet to cut and which to keep. Found from where sheets lie
+ * rather than their order, so hand-placed sheets work too. Null where a sheet
+ * shows nothing of the map.
+ */
+export function assemblyPlan(pages: Rect[], image: Rect, crop?: Rect | null): (SheetPlan | null)[] {
+  const contents = pages.map((p) => contentOf(p, image, crop))
+  return contents.map((c, i) => {
+    if (!c) return null
+    const cut = (side: 'top' | 'left', axis: 'x' | 'y'): Edge => {
+      const n = closest(contents, i, (o) => follows(o, c, axis))
+      const o = contents[n]
+      const at = axis === 'x' ? c.x : c.y
+      return { side, action: 'cut', neighbour: n, at, overlap: o ? (axis === 'x' ? o.x + o.w : o.y + o.h) - at : 0 }
+    }
+    const keep = (side: 'right' | 'bottom', axis: 'x' | 'y'): Edge => {
+      const n = closest(contents, i, (o) => follows(c, o, axis))
+      const o = contents[n]
+      const end = axis === 'x' ? c.x + c.w : c.y + c.h
+      if (!o) return { side, action: 'cut', neighbour: -1, at: end, overlap: 0 }
+      const at = axis === 'x' ? o.x : o.y
+      return { side, action: 'keep', neighbour: n, at, overlap: end - at }
+    }
+    return { content: c, edges: [cut('top', 'y'), keep('right', 'x'), keep('bottom', 'y'), cut('left', 'x')] }
+  })
+}
+
+/**
+ * An edge's line carried through the margins from just off the content's corners
+ * out to the paper's edge, never over the map. Unlike corner ticks it survives the
+ * perpendicular cut, because the kept margins always hold one end of it.
+ */
+export function edgeLines(paper: Rect, content: Rect, edge: Edge, gap = 1, shortest = 1): Segment[] {
+  const vertical = edge.side === 'left' || edge.side === 'right'
+  const [p, c] = vertical ? [swapRect(paper), swapRect(content)] : [paper, content]
+  const lines: Segment[] = []
+  if (c.x - gap - p.x >= shortest) lines.push([p.x, edge.at, c.x - gap, edge.at])
+  if (p.x + p.w - (c.x + c.w + gap) >= shortest) lines.push([c.x + c.w + gap, edge.at, p.x + p.w, edge.at])
+  return vertical ? lines.map(([a, b, d, e]): Segment => [b, a, e, d]) : lines
+}
 
 export interface HexCell {
   cx: number

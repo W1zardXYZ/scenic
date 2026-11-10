@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  PAPERS, generatePages, generatePagesIn, gridCandidates, sheetCount, pageLabel, columnsOf, intersect, gridSegments,
-  type PageSpec, type Plane,
+  PAPERS, PACK_GUTTER_MM, fogPieces, generatePages, generatePagesIn, gridCandidates, sheetCount, pageLabel, columnsOf, intersect, gridSegments, packSheets,
+  assemblyPlan, contentOf, edgeLines, paperOf, type Packing, type PageSpec, type Placement, type Plane, type SheetPlan,
 } from './layout.ts'
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`)
@@ -250,4 +250,154 @@ test('gridCandidates puts sizes that divide the map evenly first', () => {
   const [best] = gridCandidates(7000, 7000)
   assert.equal(best.pps, 140)
   assert.equal(best.cols, 50)
+})
+
+// The user's case: a 30×20 map at 25.4 mm, cropped, on A4 portrait.
+const userCase = (overlapMm = 0) => {
+  const image = { x: 0, y: 0, w: 30 * 25.4, h: 20 * 25.4 }
+  const crop = { x: 25.4, y: 25.4, w: 711.2, h: 457.2 }
+  const pages = generatePagesIn(crop, { ...image, offsetX: 0, offsetY: 0 }, spec({ marginMm: 8, overlapMm, centered: true }))
+  return { image, crop, pages, plan: assemblyPlan(pages, image, crop) }
+}
+
+test('contentOf and paperOf: content is page ∩ image ∩ crop, paper is centred on the page', () => {
+  const page = { x: 600, y: 300, w: 177.8, h: 279.4, sheetW: 210, sheetH: 297 }
+  const image = { x: 0, y: 0, w: 762, h: 508 }
+  assert.deepEqual(contentOf(page, image), { x: 600, y: 300, w: 162, h: 208 })
+  const crop = { x: 25.4, y: 25.4, w: 711.2, h: 457.2 }
+  const c = contentOf(page, image, crop)!
+  near(c.x + c.w, 736.6)
+  near(c.y + c.h, 482.6)
+  assert.equal(contentOf(page, image, { x: 0, y: 0, w: 100, h: 100 }), null)
+  const paper = paperOf(page)
+  near(paper.x, 600 - 16.1)
+  near(paper.y, 300 - 8.8)
+  assert.equal(paper.w, 210)
+})
+
+test('assemblyPlan: 4×2 grid cuts top and left, keeps edges that a later sheet covers', () => {
+  const { pages, plan } = userCase()
+  assert.equal(pages.length, 8)
+  assert.equal(columnsOf(pages), 4)
+  const at = (col: number, row: number) => plan[row * 4 + col]!
+  const sides = (p: SheetPlan) => p.edges.map((e) => `${e.side}:${e.action}:${e.neighbour}`).join(' ')
+  assert.equal(sides(at(0, 0)), 'top:cut:-1 right:keep:1 bottom:keep:4 left:cut:-1')
+  assert.equal(sides(at(1, 0)), 'top:cut:-1 right:keep:2 bottom:keep:5 left:cut:0')
+  assert.equal(sides(at(3, 1)), 'top:cut:3 right:cut:-1 bottom:cut:-1 left:cut:6')
+  // Without overlap, joins are where the content of neighbours meet.
+  for (const p of plan) {
+    for (const e of p!.edges) assert.equal(Math.abs(e.overlap) < 1e-6, true)
+  }
+  near(at(0, 0).edges[1].at, at(1, 0).content.x)
+  near(at(0, 0).edges[1].at, at(0, 0).content.x + at(0, 0).content.w)
+  // Rows hang over the crop at both ends; the content stops at the crop.
+  near(at(0, 0).content.y, 25.4)
+  near(at(0, 1).content.y + at(0, 1).content.h, 482.6)
+  assert.ok(pages[0].y < 0 && pages[4].y + pages[4].h > 500)
+})
+
+test('assemblyPlan: with overlap the join is where the next sheet starts', () => {
+  const { plan } = userCase(10)
+  const [a, b] = plan as SheetPlan[]
+  assert.equal(a.edges[1].action, 'keep')
+  near(a.edges[1].at, b.content.x)
+  near(a.edges[1].overlap, 10)
+  near(b.edges[3].overlap, 10)
+  assert.ok(a.edges[1].at < a.content.x + a.content.w)
+})
+
+test('assemblyPlan: hand-placed sheets find neighbours by position, not order', () => {
+  const image = { x: 0, y: 0, w: 400, h: 400 }
+  const page = (x: number, y: number) => ({ x, y, w: 150, h: 150, sheetW: 170, sheetH: 170 })
+  const plan = assemblyPlan([page(150, 0), page(0, 0), page(300, 300)], image)
+  assert.equal(plan[0]!.edges[3].neighbour, 1)
+  assert.equal(plan[1]!.edges[1].neighbour, 0)
+  // A sheet that only touches a corner is no neighbour.
+  assert.ok(plan[2]!.edges.every((e) => e.neighbour === -1 && e.action === 'cut'))
+})
+
+test('edgeLines: run from the content corners to the paper edge, never over the content', () => {
+  const { pages, plan } = userCase()
+  pages.forEach((page, i) => {
+    const p = plan[i]!
+    const paper = paperOf(page)
+    for (const edge of p.edges) {
+      const lines = edgeLines(paper, p.content, edge)
+      for (const [x1, y1, x2, y2] of lines) {
+        const inside = (x: number, y: number) => x > p.content.x && x < p.content.x + p.content.w && y > p.content.y && y < p.content.y + p.content.h
+        assert.ok(!inside((x1 + x2) / 2, (y1 + y2) / 2))
+        assert.ok(x1 >= paper.x - 1e-6 && x2 <= paper.x + paper.w + 1e-6 && y1 >= paper.y - 1e-6 && y2 <= paper.y + paper.h + 1e-6)
+      }
+      if (edge.side === 'left') {
+        // One line above the content, one below, both reaching the paper's edges.
+        assert.equal(lines.length, 2)
+        near(lines[0][1], paper.y)
+        near(lines[1][3], paper.y + paper.h)
+        near(lines[0][0], p.content.x)
+      }
+    }
+  })
+})
+
+const footprintOf = (s: { w: number; h: number }, p: Placement) => ({ x: p.x, y: p.y, w: p.rotated ? s.h : s.w, h: p.rotated ? s.w : s.h })
+
+/** Every piece on the printable area, and a gutter's width clear of every other piece on its sheet. */
+function assertPacked(sizes: { w: number; h: number }[], packing: Packing, marginMm: number) {
+  const [width, height] = [packing.sheetW - marginMm * 2, packing.sheetH - marginMm * 2]
+  assert.equal(packing.placements.length, sizes.length)
+  const boxes = packing.placements.map((p, i) => ({ sheet: p.sheet, ...footprintOf(sizes[i], p) }))
+  for (const b of boxes) {
+    assert.ok(b.sheet >= 0 && b.sheet < packing.sheets)
+    assert.ok(b.x >= -1e-6 && b.y >= -1e-6 && b.x + b.w <= width + 1e-6 && b.y + b.h <= height + 1e-6, `off the sheet: ${JSON.stringify(b)}`)
+  }
+  for (const [i, a] of boxes.entries()) {
+    for (const b of boxes.slice(i + 1)) {
+      if (a.sheet !== b.sheet) continue
+      const grown = { x: a.x - PACK_GUTTER_MM + 0.01, y: a.y - PACK_GUTTER_MM + 0.01, w: a.w + PACK_GUTTER_MM * 2 - 0.02, h: a.h + PACK_GUTTER_MM * 2 - 0.02 }
+      assert.equal(intersect(grown, b), null, `too close: ${JSON.stringify(a)} ${JSON.stringify(b)}`)
+    }
+  }
+}
+
+test('packing puts many small pieces on one sheet, clear of each other', () => {
+  const sizes = Array.from({ length: 12 }, (_, i) => ({ w: 40 + (i % 3) * 10, h: 50 + (i % 4) * 5 }))
+  const packing = packSheets(sizes, 210, 297, 6.35)
+  assertPacked(sizes, packing, 6.35)
+  assert.equal(packing.sheets, 1)
+})
+
+test('packing turns a piece that only fits sideways', () => {
+  const sizes = [{ w: 280, h: 100 }, { w: 100, h: 280 }]
+  const packing = packSheets(sizes, 210, 297, 0)
+  assertPacked(sizes, packing, 0)
+  assert.equal(packing.sheets, 1)
+  assert.equal(packing.sheetW, 210)
+  assert.deepEqual(packing.placements.map((p) => p.rotated).sort(), [false, true])
+})
+
+test('packing a realistic set of fog pieces beats a sheet per piece', () => {
+  const sq = 25.4
+  const sizes = [[4, 4], [4, 3], [5, 5], [5, 4], [8, 7.8], [8, 6.5], [4, 6], [8, 2], [3, 7], [4, 5], [8, 6.5], [6, 4]]
+    .map(([w, h]) => ({ w: Math.min(w * sq, 197.3), h: Math.min(h * sq, 284.3) }))
+  const packing = packSheets(sizes, 210, 297, 6.35)
+  assertPacked(sizes, packing, 6.35)
+  assert.ok(packing.sheets <= 5, `${packing.sheets} sheets`)
+})
+
+test('packing is deterministic and keeps input order', () => {
+  const sizes = [{ w: 120, h: 80 }, { w: 30, h: 30 }, { w: 120, h: 80 }, { w: 190, h: 60 }, { w: 30, h: 30 }]
+  const first = packSheets(sizes, 210, 297, 5)
+  assert.deepEqual(packSheets(sizes, 210, 297, 5), first)
+  assertPacked(sizes, first, 5)
+})
+
+test('packing nothing needs no sheets', () => {
+  assert.equal(packSheets([], 210, 297, 5).sheets, 0)
+})
+
+test('fog pieces never exceed the printable area, so packing never overflows', () => {
+  const pieces = fogPieces({ x: 0, y: 0, w: 203.2, h: 355.6 }, 210, 297, 6.35, 25.4)
+  assert.equal(pieces.length, 2)
+  const sizes = pieces.map((p) => ({ w: p.page.w, h: p.page.h }))
+  assertPacked(sizes, packSheets(sizes, 210, 297, 6.35), 6.35)
 })

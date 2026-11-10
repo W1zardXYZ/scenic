@@ -1,5 +1,6 @@
 import { memo, useRef } from 'react'
 import { ChevronRight, CloudFog, Crop, Eye, Lasso, Link2, Link2Off, PenTool, Ruler, Save, X } from 'lucide-react'
+import { FADE_MAX_MM } from '../../shared/fade.ts'
 import { circleCurve, withoutPart } from '../../shared/fog.ts'
 import { gridCandidates, PAPERS, type Plane, type Rect } from '../../shared/layout.ts'
 import type { MapRecord } from '../../shared/types.ts'
@@ -22,6 +23,7 @@ const SQUARE_PRESETS = [[String(25.4), '1 inch'], ['25', '25 mm'], ['30', '30 mm
 const OVERLAY_COLORS = ['#000000', '#ffffff', '#c23b32']
 const INK_MODES = [['color', 'Colour'], ['light', 'Saver'], ['grey', 'Grey'], ['threshold', 'B&W']] as const
 const PAPER_OPTIONS = PAPERS.map((p) => [p.id, p.label] as const)
+const FOG_PAPER_OPTIONS = [['map', 'Same as the map'] as const, ...PAPER_OPTIONS]
 const TAB = 'flex flex-col gap-8 pb-(--gutter)'
 
 /** After a change that removes the focused control, once the new controls are on the page. */
@@ -115,7 +117,7 @@ function FogRow({ item, sq, selected, change, remove, select }: {
 
 export const Settings = memo(function Settings({
   map, grid, changeGrid, setPixelsPerSquare, lockAspect, setLockAspect, gridDirty, saveGrid, prefs, changeSpec, setPrefs, crop, plane, changeCrop, looseCount, automaticCount,
-  overlay, setOverlay, filter, setFilter, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab,
+  overlay, setOverlay, filter, setFilter, fadeMm, setFadeMm, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab,
 }: {
   map: MapRecord
   grid: Grid
@@ -137,6 +139,8 @@ export const Settings = memo(function Settings({
   setOverlay: (overlay: Overlay) => void
   filter: Filter
   setFilter: React.Dispatch<React.SetStateAction<Filter>>
+  fadeMm: number
+  setFadeMm: (fadeMm: number) => void
   marks: Marks
   setMarks: (marks: Marks) => void
   fog: Fog
@@ -312,6 +316,18 @@ export const Settings = memo(function Settings({
               <LevelsControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
             )}
           </PanelGroup>
+          <PanelGroup title="Edges">
+            <SliderField
+              label="Fade to paper"
+              value={fadeMm}
+              display={fadeMm ? `${fadeMm} mm` : 'Off'}
+              min={0}
+              max={FADE_MAX_MM}
+              step={1}
+              onChange={setFadeMm}
+            />
+            <p className="text-xs text-muted-foreground">Dissolves the outer edge of {crop ? 'the print area' : 'the map'} into the white of the paper and saves ink on dark maps. Seams between sheets are not faded.</p>
+          </PanelGroup>
         </TabsContent>
 
         <TabsContent value="extras" className={TAB}>
@@ -358,6 +374,20 @@ export const Settings = memo(function Settings({
                     onCheckedChange={(separate) => setFog({ ...fog, separate })}
                   />
                   {!fog.separate && <SwitchRow label="Outline on the map" checked={fog.outline} onCheckedChange={(outline) => setFog({ ...fog, outline })} />}
+                  {fog.separate && (
+                    <SelectField
+                      label="Fog card paper"
+                      value={fog.paper ?? 'map'}
+                      options={FOG_PAPER_OPTIONS}
+                      onChange={(paper) => setFog({ ...fog, paper: paper === 'map' ? undefined : paper })}
+                    />
+                  )}
+                  <SwitchRow
+                    label="Print area names"
+                    hint={fog.names ? 'Players will see them' : fog.separate ? 'Hidden from players. The overview still lists them' : 'Hidden from players'}
+                    checked={!!fog.names}
+                    onCheckedChange={(names) => setFog({ ...fog, names })}
+                  />
                 </>
               )}
             </div>

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { bakedFog, circleCurve, curveFromStroke, type Fog, fogBounds, type FogItem, fogPath, type FogPart, liveFog, nearestOnCurve, NEW_FOG, partBounds, scaleFog, separateFog, sharpCurve, simplify, splitCurve, withoutPart } from './fog.ts'
+import { bakedFog, circleCurve, curveFromStroke, type Fog, fogBounds, type FogItem, fogPath, type FogPart, fogPlan, labelRoom, labelTone, liveFog, nearestOnCurve, NEW_FOG, partBounds, scaleFog, separateFog, sharpCurve, simplify, splitCurve, withoutPart } from './fog.ts'
 
 const rect = (x: number, y: number, w: number, h: number, subtract = false): FogPart => ({ box: { x, y, w, h }, subtract })
 const box = (id: number, mode: FogItem['mode'], on = true): FogItem => ({ id, name: `Fog ${id}`, on, mode, parts: [rect(0, 0, 10, 10)] })
@@ -81,4 +81,42 @@ test('removing the first part leaves the next one adding', () => {
   const left = withoutPart([rect(0, 0, 10, 10), rect(3, 3, 4, 4, true), rect(20, 0, 5, 5)], 0)
   assert.equal(left.length, 2)
   assert.equal(left[0].subtract, false)
+})
+
+test('fog labels are a quiet step from the fill toward its ink', () => {
+  assert.equal(labelTone('#ffffff'), '#b3b3b3')
+  assert.equal(labelTone('#000000'), '#4d4d4d')
+})
+
+test('separate covers get marks in item order, and split ones number their pieces', () => {
+  const items: FogItem[] = [
+    { id: 7, name: 'Hall', on: true, mode: 'cover', parts: [rect(0, 0, 50, 50)] },
+    { id: 8, name: 'Keep', on: true, mode: 'show', parts: [rect(0, 0, 50, 50)] },
+    { id: 9, name: 'Cave', on: true, mode: 'cover', parts: [rect(100, 0, 150, 400)] },
+  ]
+  const plan = fogPlan({ ...NEW_FOG, separate: true, items }, 210, 297, 6.35, 25.4)
+  assert.deepEqual(plan.cards.map((c) => c.id), ['F1', 'F2·1/2', 'F2·2/2'])
+  assert.deepEqual(plan.cards.map((c) => c.mark), ['F1', 'F2', 'F2'])
+  assert.equal(plan.sheets, 2)
+  // Covers outside the printed part are left out, and the rest renumber.
+  const cropped = fogPlan({ ...NEW_FOG, separate: true, items }, 210, 297, 6.35, 25.4, { x: 90, y: 0, w: 50, h: 50 })
+  assert.deepEqual(cropped.cards.map((c) => c.id), ['F1·1/2', 'F1·2/2'])
+  assert.equal(fogPlan({ ...NEW_FOG, items }, 210, 297, 6.35, 25.4).sheets, 0)
+})
+
+test('a label on an L-shaped cover lands on the floor, not in the notch', () => {
+  const ell: FogItem = { id: 1, name: 'L', on: true, mode: 'cover', parts: [rect(0, 0, 100, 20), rect(80, 0, 20, 100)] }
+  const room = labelRoom(ell, fogBounds(ell))!
+  const [x, y] = [room.x + room.w / 2, room.y + room.h / 2]
+  assert.ok(!(x < 80 && y > 20), `in the notch at ${x},${y}`)
+  assert.equal(labelRoom(ell, { x: 0, y: 50, w: 40, h: 40 }), null)
+})
+
+test('fog cards can print on other paper than the map', () => {
+  const items: FogItem[] = [{ id: 1, name: 'Cave', on: true, mode: 'cover', parts: [rect(0, 0, 150, 400)] }]
+  // Too tall for A4, so it splits; on A3 it fits whole.
+  assert.equal(fogPlan({ ...NEW_FOG, separate: true, items }, 210, 297, 6.35, 25.4).cards.length, 2)
+  const a3 = fogPlan({ ...NEW_FOG, separate: true, items, paper: 'a3' }, 210, 297, 6.35, 25.4)
+  assert.equal(a3.cards.length, 1)
+  assert.deepEqual([Math.min(a3.sheetW, a3.sheetH), Math.max(a3.sheetW, a3.sheetH)], [297, 420])
 })

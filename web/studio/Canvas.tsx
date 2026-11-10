@@ -1,5 +1,6 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { CloudFog, Crop, Hand, Lasso, Magnet, Maximize, MousePointer2, Pentagon, Plus, Redo2, Ruler, RotateCw, Square, SquarePlus, SquaresSubtract, SquaresUnite, Trash2, Undo2, ZoomOut, type LucideIcon } from 'lucide-react'
+import { fadeMask, fadeRegion } from '../../shared/fade.ts'
 import { curveFromStroke, type CurvePoint, type Fog, fogBounds, type FogPart, type FogShape, fogPath, inkOn, liveFog, nearestOnCurve, partBounds, partPath, sharpCurve, splitCurve, withoutPart } from '../../shared/fog.ts'
 import { gridSegments, hexNumbers, type Page, type PageSpec, type Plane, type Rect } from '../../shared/layout.ts'
 import { toneCurve } from '../../shared/tone.ts'
@@ -155,6 +156,36 @@ const Art = memo(function Art({ map, plane, gridType, sq, overlay, filter }: {
   )
 })
 
+/** Enough for a smooth ramp at any zoom: the veil has no detail of its own to lose. */
+const VEIL_PX = 1024
+
+/** The edge fade as an image, from the same mask the print uses so the preview cannot disagree with it. */
+function veilImage(region: Rect, fadeMm: number): string | null {
+  const pxPerMm = Math.min(4, VEIL_PX / Math.max(region.w, region.h))
+  const width = Math.max(1, Math.round(region.w * pxPerMm))
+  const height = Math.max(1, Math.round(region.h * pxPerMm))
+  const alpha = fadeMask(region, fadeMm, region, width, height)
+  if (!alpha) return null
+  const pixels = new ImageData(width, height)
+  pixels.data.fill(255)
+  for (let i = 0; i < alpha.length; i++) pixels.data[i * 4 + 3] = alpha[i]
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  canvas.getContext('2d')?.putImageData(pixels, 0, 0)
+  return canvas.toDataURL()
+}
+
+/** Over the map and grid but under the fog, the order the print draws them in. */
+const FadeVeil = memo(function FadeVeil({ plane, crop, fadeMm }: { plane: Plane; crop: Rect | null; fadeMm: number }) {
+  // Dragging the slider repaints the whole image; deferring keeps the thumb moving freely.
+  const deferred = useDeferredValue(fadeMm)
+  const region = useMemo(() => fadeRegion(plane.w, plane.h, crop), [plane.w, plane.h, crop])
+  const href = useMemo(() => (region && deferred > 0 ? veilImage(region, deferred) : null), [region, deferred])
+  if (!region || !href) return null
+  return <image href={href} x={region.x} y={region.y} width={region.w} height={region.h} preserveAspectRatio="none" pointerEvents="none" />
+})
+
 const FogLayer = memo(function FogLayer({ fog, plane }: { fog: Fog; plane: Plane }) {
   const live = liveFog(fog)
   const shows = live.filter((i) => i.mode === 'show')
@@ -281,7 +312,7 @@ function marqueePath(points: Point[], lasso: boolean): string {
 }
 
 export function Canvas({
-  map, plane, spec, gridType, sq, overlay, filter, fog, pages, automatic, editPages, selected, setSelected, tool, setTool, fogDraw, setFogDraw, fogCombine, setFogCombine, fogSnap, setFogSnap, finishFogShape, changeFogParts, mergeFog, removeFog, selectedFog, setSelectedFog, undo, redo, canUndo, canRedo, crop, onCrop, onMeasure, showSheets, backHref, shortcuts,
+  map, plane, spec, gridType, sq, overlay, filter, fadeMm, fog, pages, automatic, editPages, selected, setSelected, tool, setTool, fogDraw, setFogDraw, fogCombine, setFogCombine, fogSnap, setFogSnap, finishFogShape, changeFogParts, mergeFog, removeFog, selectedFog, setSelectedFog, undo, redo, canUndo, canRedo, crop, onCrop, onMeasure, showSheets, backHref, shortcuts,
 }: {
   map: MapRecord
   plane: Plane
@@ -290,6 +321,8 @@ export function Canvas({
   sq: number
   overlay: Overlay
   filter: Filter
+  /** Width of the faded print edge; 0 is off. */
+  fadeMm: number
   fog: Fog
   pages: LabeledPage[]
   automatic: LabeledPage[]
@@ -960,6 +993,7 @@ export function Canvas({
       >
         <SheetBacks pages={pages} />
         <Art map={map} plane={plane} gridType={gridType} sq={sq} overlay={overlay} filter={filter} />
+        <FadeVeil plane={plane} crop={crop} fadeMm={fadeMm} />
         {crop && <CropShade crop={crop} plane={plane} />}
         <FogLayer fog={fog} plane={plane} />
         {draftFog && <rect className="canvas-fog-edge" x={draftFog.x} y={draftFog.y} width={draftFog.w} height={draftFog.h} />}
