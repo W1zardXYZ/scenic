@@ -267,22 +267,25 @@ function selectionTable({ curve, amount }: Selection): Float64Array {
  * Applies each selection to the pixels, in place and in order. Which pixels
  * belong is decided by their colour before anything else changes them.
  */
-function applySelections(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, selections: Selection[], weights: Float32Array[]) {
+function applySelections(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, selections: Selection[], weights: Uint8Array[]) {
   selections.forEach((selection, k) => {
     const table = selectionTable(selection)
     const w = weights[k]
     for (let i = 0, j = 0; i < data.length; i += channels, j++) {
       if (!w[j]) continue
-      for (let c = 0; c < 3; c++) data[i + c] = Math.round(data[i + c] + w[j] * (table[data[i + c]] - data[i + c]))
+      for (let c = 0; c < 3; c++) data[i + c] = Math.round(data[i + c] + (w[j] / 255) * (table[data[i + c]] - data[i + c]))
     }
   })
 }
 
-/** Each selection's weight for every pixel, 0-1. */
-export function selectionWeights(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, selections: Selection[]): Float32Array[] {
+/**
+ * Each selection's weight for every pixel, 0-255. A byte rather than a float per
+ * pixel and selection: on a large map in the NAS's memory limit, that is the difference.
+ */
+export function selectionWeights(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, selections: Selection[]): Uint8Array[] {
   const pixels = data.length / channels
   const weighers = selections.map(selectionWeigher)
-  const weights = selections.map(() => new Float32Array(pixels))
+  const weights = selections.map(() => new Uint8Array(pixels))
   if (!selections.some((s) => s.samples.some((x) => !x.subtract))) return weights
   // Maps are mostly a few colours repeated; most pixels match one seen before.
   const seen = new Map<number, number>()
@@ -294,7 +297,7 @@ export function selectionWeights(data: Uint8Array | Uint8ClampedArray, channels:
       at = j
       seen.set(key, j)
       const [L, A, B] = oklab(data[i], data[i + 1], data[i + 2])
-      for (let k = 0; k < weighers.length; k++) weights[k][j] = weighers[k](L, A, B)
+      for (let k = 0; k < weighers.length; k++) weights[k][j] = Math.round(weighers[k](L, A, B) * 255)
     } else for (let k = 0; k < weighers.length; k++) weights[k][j] = weights[k][at]
   }
   return weights
@@ -306,9 +309,11 @@ export function selectionWeights(data: Uint8Array | Uint8ClampedArray, channels:
  * then grey in the grey modes. `printTable` does the rest, on each channel.
  */
 export function prepareColours(data: Uint8Array | Uint8ClampedArray, channels: 3 | 4, filter: Filter) {
-  const weights = filter.selections.length ? selectionWeights(data, channels, filter.selections) : []
+  // Only selections that change something need a weight for every pixel.
+  const active = filter.selections.filter(changes)
+  const weights = active.length ? selectionWeights(data, channels, active) : []
   shiftHues(data, channels, filter.hues)
-  applySelections(data, channels, filter.selections, weights)
+  applySelections(data, channels, active, weights)
   if (!isGrey(filter)) return
   for (let i = 0; i < data.length; i += channels) data[i] = data[i + 1] = data[i + 2] = greyOf(data[i], data[i + 1], data[i + 2])
 }

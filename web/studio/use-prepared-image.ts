@@ -90,7 +90,7 @@ export function useSelectionMask(src: string, selection: Selection | null): stri
       image.data[i] = 230
       image.data[i + 1] = 30
       image.data[i + 2] = 60
-      image.data[i + 3] = Math.round((1 - weights[j]) * 150)
+      image.data[i + 3] = Math.round((1 - weights[j] / 255) * 150)
     }
   })
 }
