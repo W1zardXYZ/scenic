@@ -97,10 +97,11 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const fogCount = useMemo(() => {
     const reference = pages[0]
     if (!reference) return 0
-    // The placement page comes first, whenever there is anything to place.
+    // A PDF overview shows where the fog goes; otherwise the placement gets a page of its own.
     const { sheets } = fogPlan(fog, reference.sheetW, reference.sheetH, prefs.marginMm, sq, crop)
-    return sheets ? sheets + 1 : 0
-  }, [crop, fog, pages, prefs.marginMm, sq])
+    const placement = marks.overview && output.format === 'pdf' ? 0 : 1
+    return sheets ? sheets + placement : 0
+  }, [crop, fog, pages, prefs.marginMm, sq, marks.overview, output.format])
   const looseCount = useMemo(() => {
     const loose = { ...spec, seamsOnGrid: false }
     return (crop ? generatePagesIn(crop, plane, loose) : generatePages(plane, loose)).length

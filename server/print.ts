@@ -429,10 +429,20 @@ function placementLayout(q: PrintRequest) {
   return turned.scale > given.scale * 1.001 ? turned : given
 }
 
+/** Where a stretch of the map (`view`) lands on a page, in page mm. */
+interface MapPlacement {
+  sheetW: number
+  sheetH: number
+  view: Rect
+  scale: number
+  x: number
+  y: number
+}
+
 type PlacementLayout = ReturnType<typeof placementLayout>
 
 /** Every separate cover outlined where it goes, split ones with their seams, over a map drawn underneath. */
-function placementSvg(plan: FogPlan, L: PlacementLayout, labels: Label[]): string {
+function placementSvg(plan: FogPlan, L: MapPlacement, labels: Label[], frame = true): string {
   const { view, scale } = L
   const items = [...new Set(plan.cards.map((c) => c.item))]
   // Widths in page mm, so lines read the same however small the map is drawn; the white halo carries them over dark maps.
@@ -452,19 +462,26 @@ function placementSvg(plan: FogPlan, L: PlacementLayout, labels: Label[]): strin
   return `${fogSvgOpen({ x: 0, y: 0, w: L.sheetW, h: L.sheetH })}
     <clipPath id="v"><rect x="${view.x}" y="${view.y}" width="${view.w}" height="${view.h}"/></clipPath>
     <g transform="translate(${L.x} ${L.y}) scale(${scale}) translate(${-view.x} ${-view.y})"><g clip-path="url(#v)">${outlines}${seams}</g></g>
-    <rect x="${L.x}" y="${L.y}" width="${view.w * scale}" height="${view.h * scale}" fill="none" stroke="#000" stroke-width="0.2"/>
+    ${frame ? `<rect x="${L.x}" y="${L.y}" width="${view.w * scale}" height="${view.h * scale}" fill="none" stroke="#000" stroke-width="0.2"/>` : ''}
     ${labels.map(svgLabel).join('')}</svg>`
 }
 
-/** A heading, then each cover's mark on it; a split cover marks every piece, where that piece goes. */
+const FOG_HOWTO = 'Cut out each fog card and lay it where its mark shows. Pieces of a split cover overlap on the dashed glue tabs.'
+
+/** A heading, then each cover's mark on it. */
 function placementLabels(plan: FogPlan, L: PlacementLayout): Label[] {
   const width = L.sheetW - L.margin * 2
   const title = 'Fog placement'
-  const intro = 'Cut out each fog card and lay it where its mark shows. Pieces of a split cover overlap on the dashed glue tabs.'
-  const labels: Label[] = [
+  return [
     { text: title, x: L.sheetW / 2, y: L.margin + 2.5, size: fitted(title, 7, width, 'bold'), weight: 'bold', color: '#111111' },
-    { text: intro, x: L.sheetW / 2, y: L.margin + 9.5, size: fitted(intro, 3.4, width), weight: 'regular', color: '#555555' },
+    { text: FOG_HOWTO, x: L.sheetW / 2, y: L.margin + 9.5, size: fitted(FOG_HOWTO, 3.4, width), weight: 'regular', color: '#555555' },
+    ...coverMarks(plan, L, 4),
   ]
+}
+
+/** Each cover's mark where it goes; a split cover marks every piece. `size` is in page mm. */
+function coverMarks(plan: FogPlan, L: MapPlacement, size: number): Label[] {
+  const labels: Label[] = []
   const items = [...new Set(plan.cards.map((c) => c.item))]
   const marks = items.flatMap((item) => {
     const pieces = plan.cards.filter((c) => c.item === item)
@@ -477,7 +494,7 @@ function placementLabels(plan: FogPlan, L: PlacementLayout): Label[] {
     if (!seen) continue
     const x = L.x + (seen.x + seen.w / 2 - L.view.x) * L.scale
     const y = L.y + (seen.y + seen.h / 2 - L.view.y) * L.scale
-    labels.push({ text, x, y, size: 4, weight: 'bold', color: '#111111', halo: '#ffffff' })
+    labels.push({ text, x, y, size, weight: 'bold', color: '#111111', halo: '#ffffff' })
   }
   return labels
 }
@@ -607,7 +624,8 @@ function assemblySteps(q: PrintRequest): string[] {
   ]
 }
 
-async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, title: string) {
+/** The map with its sheets and, when fog prints separately, where each fog card goes: one page for both. */
+async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, title: string, plan: FogPlan) {
   const margin = Math.max(q.marginMm, 10)
   const mapW = q.grid.cols * q.squareMm
   const mapH = q.grid.rows * q.squareMm
@@ -619,7 +637,8 @@ async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: 
   const checkW = RULER_W + (square ? 10 + Math.max(square, 24) : 0)
   const hint = 'Print at 100% / actual size, with "fit to page" turned off. The scale must measure 100 mm and 4 in'
     + (square ? ', and the box one grid square.' : '.')
-  const steps = q.marks.cut ? assemblySteps(q) : []
+  const fogNote = `Fog cards: ${FOG_HOWTO.charAt(0).toLowerCase()}${FOG_HOWTO.slice(1)} The pink outlines above show where each one goes.`
+  const steps = [...(q.marks.cut ? assemblySteps(q) : []), ...(plan.sheets ? [fogNote] : [])]
   const textH = (text: string, width: number, size: number) => doc.fontSize(size).heightOfString(text, { width: width * MM, lineGap: 1 }) / MM
   const stepsH = (width: number) => steps.length ? 5 + steps.reduce((h, s) => h + textH(s, width, 7.5) + 1, 0) : 0
 
@@ -644,6 +663,7 @@ async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: 
   doc.fillColor('#111111').fontSize(16).text(title, margin * MM, margin * MM, { width: (sheetW - margin * 2) * MM, lineBreak: false, height: 20, ellipsis: true })
   const summary = `${q.pages.length} sheets   ${Math.round(q.grid.cols)} × ${Math.round(q.grid.rows)} squares   ${q.squareMm.toFixed(1)} mm per square   ${(mapW / 10).toFixed(1)} × ${(mapH / 10).toFixed(1)} cm`
     + (q.crop ? `   printing ${(q.crop.w / 10).toFixed(1)} × ${(q.crop.h / 10).toFixed(1)} cm of it` : '')
+    + (plan.sheets ? `   ${plan.cards.length} fog cards on ${plan.sheets} ${plan.sheets === 1 ? 'sheet' : 'sheets'}` : '')
   doc.fillColor('#555555').fontSize(9).text(summary, margin * MM, (margin + 8) * MM, { lineBreak: false })
 
   const ox = area.x + (area.w - (bounds.r - bounds.x) * scale) / 2 - bounds.x * scale
@@ -667,9 +687,26 @@ async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: 
     const [x, y, w, h] = at(p)
     doc.rect(x, y, w, h).lineWidth(0.75).strokeColor('#ffffff').stroke()
     doc.rect(x, y, w, h).lineWidth(0.25).strokeColor('#000000').stroke()
+  }
+  const view = (q.crop && intersect({ x: 0, y: 0, w: mapW, h: mapH }, q.crop)) || { x: 0, y: 0, w: mapW, h: mapH }
+  const placed: MapPlacement = { sheetW, sheetH, view, scale, x: ox + view.x * scale, y: oy + view.y * scale }
+  if (plan.sheets) {
+    const lines = await rasterSvg(placementSvg(plan, placed, [], false), sheetW, sheetH, FOG_PX_PER_MM)
+    doc.image(lines, 0, 0, { width: sheetW * MM, height: sheetH * MM })
+  }
+  for (const p of q.pages) {
+    if (plan.sheets) {
+      // Fog marks take the middle of the map, so sheet names step aside to a corner of their sheet.
+      const size = Math.min(2.6, p.h * scale * 0.2)
+      const x = ox + p.x * scale + 1.2 + textWidth(p.label, size, 'bold') / 2
+      pdfLabel(doc, { text: p.label, x, y: oy + p.y * scale + 1.2 + size / 2, size, weight: 'bold', color: '#111111', halo: '#ffffff' })
+      continue
+    }
+    const [x, y, w, h] = at(p)
     const size = Math.min(10, h * 0.3)
     doc.fontSize(size).fillColor('#ffffff').text(p.label, x, y + h / 2 - size / 2, { width: w, align: 'center', lineBreak: false, stroke: true, fill: true })
   }
+  for (const label of coverMarks(plan, placed, 3.2)) pdfLabel(doc, label)
 
   const footerY = sheetH - margin - footerH
   if (steps.length) {
@@ -726,7 +763,8 @@ async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: 
   // The bundled face rather than a PDF base font, so PDF text matches the outlined text in the raster layers.
   const doc = new PDFDocument({ autoFirstPage: false, compress: true, font: FONT_FILE.regular, info: { Title: title, Creator: 'Scenic' } })
   const out = doc.pipe(createWriteStream(target))
-  if (q.marks.overview) await drawOverviewPage(doc, q, file, title)
+  const plan = fogPlanFor(q)
+  if (q.marks.overview) await drawOverviewPage(doc, q, file, title, plan)
 
   let done = 0
   for await (const [sheet, tile] of tiles(q.pages.map(sheetOf), (s) => renderTile(raster, q, file, s.page, 'jpeg'))) {
@@ -744,8 +782,8 @@ async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: 
     if (fog) doc.image(fog, sheet.left * MM, sheet.top * MM, { width: sheet.page.w * MM, height: sheet.page.h * MM })
     progress(++done)
   }
-  const plan = fogPlanFor(q)
-  if (plan.sheets) await drawPlacementPage(doc, q, file, plan)
+  // The overview already shows where the fog goes; without one, the placement gets its own page.
+  if (plan.sheets && !q.marks.overview) await drawPlacementPage(doc, q, file, plan)
   for (const [i, cards] of cardsBySheet(plan).entries()) await drawFogSheet(doc, q, plan, cards, i, title)
   doc.end()
   await finished(out)
@@ -854,7 +892,10 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
   await finished(out)
 }
 
-export const printKey = (q: PrintRequest, file: FileRow) => `print|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
+/** Bump whenever the same request should print differently, so cached files from older layouts are not served. */
+const PRINT_LAYOUT = 2
+
+export const printKey = (q: PrintRequest, file: FileRow) => `print|${PRINT_LAYOUT}|${file.path}|${file.entry}|${file.mtime}|${JSON.stringify(q)}`
 
 export async function generate(q: PrintRequest, file: FileRow, progress: (done: number) => void): Promise<string> {
   const ext = q.output.format === 'pdf' ? '.pdf' : '.zip'
