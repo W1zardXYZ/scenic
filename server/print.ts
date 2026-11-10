@@ -623,13 +623,17 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
     if (tile) {
       const x = Math.max(0, tile.x)
       const y = Math.max(0, tile.y)
+      const [fitW, fitH] = [Math.round(tile.w * pxPerMm), Math.round(tile.h * pxPerMm)]
+      const left = Math.round((x - tile.x) * pxPerMm)
+      const top = Math.round((y - tile.y) * pxPerMm)
+      // Rounding each side separately can ask for a pixel past the resized tile.
       const fitted = await sharp(tile.data)
-        .resize(Math.round(tile.w * pxPerMm), Math.round(tile.h * pxPerMm), { fit: 'fill' })
+        .resize(fitW, fitH, { fit: 'fill' })
         .extract({
-          left: Math.round((x - tile.x) * pxPerMm),
-          top: Math.round((y - tile.y) * pxPerMm),
-          width: Math.round(Math.min(tile.w - (x - tile.x), sheet.page.w - x) * pxPerMm),
-          height: Math.round(Math.min(tile.h - (y - tile.y), sheet.page.h - y) * pxPerMm),
+          left,
+          top,
+          width: Math.min(fitW - left, Math.round(Math.min(tile.w - (x - tile.x), sheet.page.w - x) * pxPerMm)),
+          height: Math.min(fitH - top, Math.round(Math.min(tile.h - (y - tile.y), sheet.page.h - y) * pxPerMm)),
         })
         .toBuffer()
       layers.push({ input: fitted, left: Math.round((sheet.left + x) * pxPerMm), top: Math.round((sheet.top + y) * pxPerMm) })
