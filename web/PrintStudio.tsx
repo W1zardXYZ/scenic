@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Download, ExternalLink, RotateCcw, SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  columnsOf, fogPieces, generatePages, generatePagesIn, pageLabel, PAPERS, type Plane, type Rect,
+  columnsOf, generatePages, generatePagesIn, pageLabel, PAPERS, type Plane, type Rect,
 } from '../shared/layout.ts'
-import { type FogItem, type FogPart, type FogShape, fogBounds, NEW_FOG, scaleFog, separateFog } from '../shared/fog.ts'
+import { type FogItem, type FogPart, type FogShape, fogPlan, NEW_FOG, scaleFog } from '../shared/fog.ts'
 import type { Library, MapRecord } from '../shared/types.ts'
 import { NEUTRAL_LEVELS } from '../shared/tone.ts'
 import { AppBar } from '@/components/app-bar'
@@ -97,8 +97,10 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
   const fogCount = useMemo(() => {
     const reference = pages[0]
     if (!reference) return 0
-    return separateFog(fog).reduce((n, item) => n + fogPieces(fogBounds(item), reference.sheetW, reference.sheetH, prefs.marginMm, sq).length, 0)
-  }, [fog, pages, prefs.marginMm, sq])
+    // The placement page comes first, whenever there is anything to place.
+    const { sheets } = fogPlan(fog, reference.sheetW, reference.sheetH, prefs.marginMm, sq, crop)
+    return sheets ? sheets + 1 : 0
+  }, [crop, fog, pages, prefs.marginMm, sq])
   const looseCount = useMemo(() => {
     const loose = { ...spec, seamsOnGrid: false }
     return (crop ? generatePagesIn(crop, plane, loose) : generatePages(plane, loose)).length

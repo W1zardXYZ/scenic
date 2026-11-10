@@ -4,16 +4,19 @@ import PDFDocument from 'pdfkit'
 import sharp from 'sharp'
 import yazl from 'yazl'
 import {
-  assemblyPlan, type Edge, edgeLines, FOG_TAB_MM, fogPieces, gridSegments, hexNumbers, intersect, type Page, paperOf, type Rect,
+  assemblyPlan, type Edge, edgeLines, FOG_TAB_MM, gridSegments, hexNumbers, intersect, type Page, paperOf, type Rect,
   type Segment, type Side,
 } from '../shared/layout.ts'
 import { fadeMask, fadeRegion } from '../shared/fade.ts'
-import { bakedFog, type Fog, type FogItem, type FogPart, fogBounds, fogPath, inkOn, separateFog, touches } from '../shared/fog.ts'
+import {
+  bakedFog, type Fog, type FogCard, type FogItem, type FogPart, type FogPlan, fogBounds, fogPath, fogPlan, inkOn, labelRoom, labelTone, touches,
+} from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
 import { isNeutral, type Levels, toneCurve } from '../shared/tone.ts'
 import { PIXEL_LIMIT } from './analyze.ts'
 import type { FileRow } from './db.ts'
 import { safeName } from './export.ts'
+import { capHeight, FONT_FILE, textPath, textWidth, type Weight } from './font.ts'
 import { thumbPath } from './scan.ts'
 import { cached, cachePath, localImage } from './source.ts'
 
@@ -187,10 +190,14 @@ const MARK_MM = 0.15
 const MARK_DASH = [1.2, 0.8]
 const NOTE_PT = 6
 const NOTE_MM = (NOTE_PT * 25.4) / 72
-/** Roughly Helvetica's average advance, to fit notes the same way in the PDF and the PNG. */
+/** Shortens a note to `mm` using the bundled font's real advances, so the PDF and the PNG agree. */
 const fitText = (text: string, mm: number) => {
-  const room = Math.floor(mm / (NOTE_MM * 0.55))
-  return text.length <= room ? text : room > 3 ? `${text.slice(0, room - 1).trimEnd()}…` : ''
+  if (textWidth(text, NOTE_MM) <= mm) return text
+  for (let n = text.length - 1; n > 3; n--) {
+    const short = `${text.slice(0, n).trimEnd()}…`
+    if (textWidth(short, NOTE_MM) <= mm) return short
+  }
+  return ''
 }
 
 const imageRect = (q: PrintRequest): Rect => ({ x: 0, y: 0, w: q.grid.cols * q.squareMm, h: q.grid.rows * q.squareMm })
@@ -263,29 +270,58 @@ function overlayFor(q: PrintRequest, file: FileRow, sheet: Sheet): Overlay {
   return { clip, grid, numbers, cuts, joins, notes }
 }
 
-function fogSheets(q: PrintRequest) {
-  const reference = q.pages[0]
-  return separateFog(q.fog).flatMap((item) => {
-    const bounds = fogBounds(item)
-    const pieces = fogPieces(bounds, reference.sheetW, reference.sheetH, q.marginMm, q.squareMm)
-    return pieces.map((piece, i) => ({
-      sheet: sheetOf({ ...piece.page, label: `${item.name} ${i + 1}` }),
-      item,
-      region: { x: bounds.x + piece.page.x, y: bounds.y + piece.page.y, w: piece.page.w, h: piece.page.h },
-      tabRight: piece.tabRight,
-      tabBottom: piece.tabBottom,
-      name: `${item.name} — piece ${i + 1} of ${pieces.length}`,
-    }))
-  })
+/** Separate covers for this print, packed onto the same paper as the map. */
+const fogPlanFor = (q: PrintRequest) => fogPlan(q.fog, q.pages[0].sheetW, q.pages[0].sheetH, q.marginMm, q.squareMm, q.crop)
+
+const cardsBySheet = (plan: FogPlan) => Array.from({ length: plan.sheets }, (_, s) => plan.cards.filter((c) => c.placement.sheet === s))
+
+const footprint = ({ region: r, placement }: FogCard) => (placement.rotated ? { w: r.h, h: r.w } : { w: r.w, h: r.h })
+
+/** Where a point of the map lands on its card's sheet, turning with the card. */
+function onSheet(q: PrintRequest, { region: r, placement: p }: FogCard, x: number, y: number): [number, number] {
+  const [u, v] = [x - r.x, y - r.y]
+  const [left, top] = [q.marginMm + p.x, q.marginMm + p.y]
+  return p.rotated ? [left + r.h - v, top + u] : [left + u, top + v]
 }
 
-const escapeXml = (text: string) => text.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)
 const CUT_LINE = 'stroke="#000" stroke-width="0.4"'
 const fogSvgOpen = (view: Rect) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${view.x} ${view.y} ${view.w} ${view.h}">`
 
-function fogName(item: FogItem, x: number, y: number, size: number, fill: string) {
-  return `<text x="${x}" y="${y}" font-size="${Math.min(size, 14)}" font-family="sans-serif" text-anchor="middle" dominant-baseline="central" fill="${inkOn(fill)}">${escapeXml(item.name)}</text>`
+interface Label {
+  text: string
+  /** Centre of the text; `y` sits halfway up the capitals. */
+  x: number
+  y: number
+  size: number
+  weight: Weight
+  color: string
+  halo?: string
 }
+
+/** Text as outlines, since librsvg would look the font up through fontconfig and draw boxes on a bare server. */
+const svgLabel = (l: Label) => {
+  const d = textPath(l.text, l.x, l.y, l.size, l.weight)
+  const halo = l.halo ? `<path d="${d}" fill="none" stroke="${l.halo}" stroke-width="${l.size * 0.3}" stroke-linejoin="round"/>` : ''
+  return `${halo}<path d="${d}" fill="${l.color}"/>`
+}
+
+/** A label as real PDF text in the bundled font; `x,y` place it on the page when its own are in other units. */
+function pdfLabel(doc: PDFKit.PDFDocument, l: Label, x = l.x, y = l.y, turned = false) {
+  const size = l.size * MM
+  const at = [-textWidth(l.text, size, l.weight) / 2, capHeight(size, l.weight) / 2] as const
+  doc.save().translate(x * MM, y * MM)
+  if (turned) doc.rotate(90)
+  doc.font(FONT_FILE[l.weight]).fontSize(size)
+  if (l.halo) {
+    doc.lineWidth(size * 0.3).lineJoin('round').strokeColor(l.halo)
+      .text(l.text, ...at, { baseline: 'alphabetic', lineBreak: false, stroke: true, fill: false })
+  }
+  doc.fillColor(l.color).text(l.text, ...at, { baseline: 'alphabetic', lineBreak: false })
+  doc.restore().font(FONT_FILE.regular)
+}
+
+/** The largest size up to `size` at which `text` fits `width`. */
+const fitted = (text: string, size: number, width: number, weight: Weight = 'regular') => Math.min(size, width / Math.max(1e-6, textWidth(text, 1, weight)))
 
 /** Fog for part of the map, or null if none of it lands there. */
 function bakedSvg(q: PrintRequest, region: Rect): string | null {
@@ -298,9 +334,12 @@ function bakedSvg(q: PrintRequest, region: Rect): string | null {
   const { x, y, w, h } = region
   const box = `x="${x}" y="${y}" width="${w}" height="${h}"`
   const shapes = (list: FogItem[], fill: string) => list.map((i) => `<path d="${fogPath(i)}" fill="${fill}"/>`).join('')
-  const names = covers.map((i) => {
+  const names = covers.filter((i) => i.name.trim()).map((i) => {
     const b = fogBounds(i)
-    return fogName(i, b.x + b.w / 2, b.y + b.h / 2, Math.min(b.w, b.h) * 0.14, q.fog.fill)
+    const room = labelRoom(i, b) ?? b
+    const text = i.name.trim()
+    const size = fitted(text, Math.min(14, b.w * 0.14, b.h * 0.14, room.h * 0.5), room.w * 0.8)
+    return svgLabel({ text, x: room.x + room.w / 2, y: room.y + room.h / 2, size, weight: 'regular', color: labelTone(q.fog.fill) })
   }).join('')
   const edges = q.fog.outline ? covers.map((i) => `<path d="${fogPath(i)}" fill="none" ${CUT_LINE}/>`).join('') : ''
   return `${fogSvgOpen(region)}
@@ -309,29 +348,47 @@ function bakedSvg(q: PrintRequest, region: Rect): string | null {
     <g clip-path="url(#c)"><rect ${box} fill="${q.fog.fill}" mask="url(#f)"/>${edges}${names}</g></svg>`
 }
 
-/** One sheet of a cover printed on its own. Cut along the solid line; dashes mark where the next piece glues on. */
-function pieceSvg(q: PrintRequest, fog: ReturnType<typeof fogSheets>[number], pad: number): string {
-  const { item, region: r, tabRight, tabBottom } = fog
+/** The mark is what gets matched against the placement page, so it leads; the name confirms it. */
+function cardLabels(q: PrintRequest, card: FogCard): Label[] {
+  // Centred on the shape within this piece: a label off the shape would be cut away with the paper.
+  const box = labelRoom(card.item, card.region) ?? card.region
+  const color = labelTone(q.fog.fill)
+  const name = card.item.name.trim()
+  const room = box.w * 0.8
+  const s = Math.min(6, box.h * 0.2, fitted(card.id, Infinity, room / 1.4, 'bold'), name ? fitted(name, Infinity, room) : Infinity)
+  const [idCap, gap, nameCap] = [capHeight(s * 1.4, 'bold'), s * 0.6, name ? capHeight(s) : 0]
+  const top = box.y + (box.h - idCap - (name ? gap + nameCap : 0)) / 2
+  const x = box.x + box.w / 2
+  const labels: Label[] = [{ text: card.id, x, y: top + idCap / 2, size: s * 1.4, weight: 'bold', color }]
+  if (name) labels.push({ text: name, x, y: top + idCap + gap + nameCap / 2, size: s, weight: 'regular', color })
+  return labels
+}
+
+/** One card on its own footprint, turned with it. Cut along the solid line; dashes mark where the next piece glues on. */
+function cardSvg(q: PrintRequest, card: FogCard, pad: number, labels: Label[]): string {
+  const { item, region: r, tabRight, tabBottom, placement } = card
+  const { w, h } = footprint(card)
   const d = fogPath(item)
   const ink = inkOn(q.fog.fill)
   const glue = [
     tabRight ? `M${r.x + r.w - FOG_TAB_MM} ${r.y}v${r.h}` : '',
     tabBottom ? `M${r.x} ${r.y + r.h - FOG_TAB_MM}h${r.w}` : '',
   ].join('')
-  // Every piece carries the name whole, so it fits the piece rather than the shape.
-  const size = Math.min(r.w, r.h, (r.w / Math.max(1, item.name.length)) * 1.4) * 0.5
-  return `${fogSvgOpen({ x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 })}
+  const turn = `${placement.rotated ? `translate(${r.h} 0) rotate(90) ` : ''}translate(${-r.x} ${-r.y})`
+  return `${fogSvgOpen({ x: -pad, y: -pad, w: w + pad * 2, h: h + pad * 2 })}
     <clipPath id="p"><rect x="${r.x - pad}" y="${r.y - pad}" width="${r.w + pad * 2}" height="${r.h + pad * 2}"/></clipPath>
     <clipPath id="s"><path d="${d}"/></clipPath>
     <clipPath id="r"><rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}"/></clipPath>
-    <g clip-path="url(#r)"><path d="${d}" fill="${q.fog.fill}"/></g>
-    <g clip-path="url(#p)">
-      <path d="${d}" fill="none" ${CUT_LINE}/>
-      <g clip-path="url(#s)">
-        <rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="none" stroke="#000" stroke-width="0.8"/>
-        <path d="${glue}" fill="none" stroke="${ink}" stroke-opacity="0.6" stroke-width="0.2" stroke-dasharray="1.4 1"/>
+    <g transform="${turn}">
+      <g clip-path="url(#r)"><path d="${d}" fill="${q.fog.fill}"/></g>
+      <g clip-path="url(#p)">
+        <path d="${d}" fill="none" ${CUT_LINE}/>
+        <g clip-path="url(#s)">
+          <rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="none" stroke="#000" stroke-width="0.8"/>
+          <path d="${glue}" fill="none" stroke="${ink}" stroke-opacity="0.6" stroke-width="0.2" stroke-dasharray="1.4 1"/>
+        </g>
+        ${labels.map(svgLabel).join('')}
       </g>
-      ${fogName(item, r.x + r.w / 2, r.y + r.h / 2, size, q.fog.fill)}
     </g></svg>`
 }
 
@@ -346,11 +403,99 @@ function bakedLayer(q: PrintRequest, region: Rect, pxPerMm: number): Promise<Buf
 }
 
 /** Room for the outline at the sheet's edge, where there is margin to give it. */
-const fogPad = ({ left, top }: Sheet) => Math.min(1, left, top)
+const fogPad = (q: PrintRequest) => Math.min(1, q.marginMm)
 
-function pieceLayer(q: PrintRequest, fog: ReturnType<typeof fogSheets>[number], pxPerMm: number) {
-  const pad = fogPad(fog.sheet)
-  return rasterSvg(pieceSvg(q, fog, pad), fog.region.w + pad * 2, fog.region.h + pad * 2, pxPerMm)
+function cardLayer(q: PrintRequest, card: FogCard, pxPerMm: number, labels: Label[]) {
+  const pad = fogPad(q)
+  const { w, h } = footprint(card)
+  return rasterSvg(cardSvg(q, card, pad, labels), w + pad * 2, h + pad * 2, pxPerMm)
+}
+
+const PLACE_INK = '#d81b60'
+
+/** Where the printed part of the map sits on the placement page, turned whichever way shows it largest. */
+function placementLayout(q: PrintRequest) {
+  const map = { x: 0, y: 0, w: q.grid.cols * q.squareMm, h: q.grid.rows * q.squareMm }
+  const view = (q.crop && intersect(map, q.crop)) || map
+  const { sheetW, sheetH } = q.pages[0]
+  const margin = Math.max(q.marginMm, 10)
+  const head = 16
+  const fit = (w: number, h: number) => {
+    const area = { w: w - margin * 2, h: h - margin * 2 - head }
+    const scale = Math.min(area.w / view.w, area.h / view.h)
+    return { sheetW: w, sheetH: h, margin, view, scale, x: margin + (area.w - view.w * scale) / 2, y: margin + head }
+  }
+  const [given, turned] = [fit(sheetW, sheetH), fit(sheetH, sheetW)]
+  return turned.scale > given.scale * 1.001 ? turned : given
+}
+
+type PlacementLayout = ReturnType<typeof placementLayout>
+
+/** Every separate cover outlined where it goes, split ones with their seams, over a map drawn underneath. */
+function placementSvg(plan: FogPlan, L: PlacementLayout, labels: Label[]): string {
+  const { view, scale } = L
+  const items = [...new Set(plan.cards.map((c) => c.item))]
+  // Widths in page mm, so lines read the same however small the map is drawn; the white halo carries them over dark maps.
+  const mm = (v: number) => v / scale
+  const outlines = items.map((item) => `<path d="${fogPath(item)}" fill="${PLACE_INK}" fill-opacity="0.15" stroke="#fff" stroke-width="${mm(1.2)}" stroke-linejoin="round"/>
+    <path d="${fogPath(item)}" fill="none" stroke="${PLACE_INK}" stroke-width="${mm(0.45)}" stroke-linejoin="round"/>`).join('')
+  const seams = items.map((item, n) => {
+    const d = plan.cards.filter((c) => c.item === item).map(({ region: r, tabRight, tabBottom }) => [
+      tabRight ? `M${r.x + r.w - FOG_TAB_MM} ${r.y}v${r.h}` : '',
+      tabBottom ? `M${r.x} ${r.y + r.h - FOG_TAB_MM}h${r.w}` : '',
+    ].join('')).join('')
+    if (!d) return ''
+    return `<clipPath id="s${n}"><path d="${fogPath(item)}"/></clipPath><g clip-path="url(#s${n})">
+      <path d="${d}" fill="none" stroke="#fff" stroke-width="${mm(1)}"/>
+      <path d="${d}" fill="none" stroke="${PLACE_INK}" stroke-width="${mm(0.35)}" stroke-dasharray="${mm(1.5)} ${mm(1)}"/></g>`
+  }).join('')
+  return `${fogSvgOpen({ x: 0, y: 0, w: L.sheetW, h: L.sheetH })}
+    <clipPath id="v"><rect x="${view.x}" y="${view.y}" width="${view.w}" height="${view.h}"/></clipPath>
+    <g transform="translate(${L.x} ${L.y}) scale(${scale}) translate(${-view.x} ${-view.y})"><g clip-path="url(#v)">${outlines}${seams}</g></g>
+    <rect x="${L.x}" y="${L.y}" width="${view.w * scale}" height="${view.h * scale}" fill="none" stroke="#000" stroke-width="0.2"/>
+    ${labels.map(svgLabel).join('')}</svg>`
+}
+
+/** A heading, then each cover's mark on it; a split cover marks every piece, where that piece goes. */
+function placementLabels(plan: FogPlan, L: PlacementLayout): Label[] {
+  const width = L.sheetW - L.margin * 2
+  const title = 'Fog placement'
+  const intro = 'Cut out each fog card and lay it where its mark shows. Pieces of a split cover overlap on the dashed glue tabs.'
+  const labels: Label[] = [
+    { text: title, x: L.sheetW / 2, y: L.margin + 2.5, size: fitted(title, 7, width, 'bold'), weight: 'bold', color: '#111111' },
+    { text: intro, x: L.sheetW / 2, y: L.margin + 9.5, size: fitted(intro, 3.4, width), weight: 'regular', color: '#555555' },
+  ]
+  const items = [...new Set(plan.cards.map((c) => c.item))]
+  const marks = items.flatMap((item) => {
+    const pieces = plan.cards.filter((c) => c.item === item)
+    return pieces.length > 1
+      ? pieces.map((c) => ({ text: c.id, box: labelRoom(item, c.region) }))
+      : [{ text: pieces[0].mark, box: labelRoom(item, fogBounds(item)) }]
+  })
+  for (const { text, box } of marks) {
+    const seen = box && intersect(box, L.view)
+    if (!seen) continue
+    const x = L.x + (seen.x + seen.w / 2 - L.view.x) * L.scale
+    const y = L.y + (seen.y + seen.h / 2 - L.view.y) * L.scale
+    labels.push({ text, x, y, size: 4, weight: 'bold', color: '#111111', halo: '#ffffff' })
+  }
+  return labels
+}
+
+/** The thumbnail, cut to the printed part of the map. */
+async function placementMap(q: PrintRequest, file: FileRow, { view }: PlacementLayout): Promise<Buffer> {
+  const thumb = thumbPath(file.id, 'large')
+  const { width = 1, height = 1 } = await sharp(thumb).metadata()
+  const [sx, sy] = [width / (q.grid.cols * q.squareMm), height / (q.grid.rows * q.squareMm)]
+  const left = Math.min(width - 1, Math.max(0, Math.floor(view.x * sx)))
+  const top = Math.min(height - 1, Math.max(0, Math.floor(view.y * sy)))
+  const right = Math.min(width, Math.ceil((view.x + view.w) * sx))
+  const bottom = Math.min(height, Math.ceil((view.y + view.h) * sy))
+  return sharp(thumb)
+    .extract({ left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) })
+    .flatten({ background: '#ffffff' })
+    .jpeg({ quality: 82 })
+    .toBuffer()
 }
 
 /**
@@ -549,17 +694,37 @@ async function drawOverviewPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: 
   }
 }
 
-async function drawFog(doc: PDFKit.PDFDocument, q: PrintRequest, fog: ReturnType<typeof fogSheets>[number]) {
-  const { sheet, region, name } = fog
-  const { page, left, top } = sheet
-  const pad = fogPad(sheet)
-  doc.image(await pieceLayer(q, fog, FOG_PX_PER_MM), (left - pad) * MM, (top - pad) * MM, { width: (region.w + pad * 2) * MM, height: (region.h + pad * 2) * MM })
-  doc.fillColor('#555555').fontSize(6).text(name, left * MM, (top + page.h + 1) * MM, { lineBreak: false })
+async function drawPlacementPage(doc: PDFKit.PDFDocument, q: PrintRequest, file: FileRow, plan: FogPlan) {
+  const L = placementLayout(q)
+  doc.addPage({ size: [L.sheetW * MM, L.sheetH * MM], margin: 0 })
+  doc.image(await placementMap(q, file, L), L.x * MM, L.y * MM, { width: L.view.w * L.scale * MM, height: L.view.h * L.scale * MM })
+  const lines = await rasterSvg(placementSvg(plan, L, []), L.sheetW, L.sheetH, FOG_PX_PER_MM)
+  doc.image(lines, 0, 0, { width: L.sheetW * MM, height: L.sheetH * MM })
+  for (const label of placementLabels(plan, L)) pdfLabel(doc, label)
+}
+
+async function drawFogSheet(doc: PDFKit.PDFDocument, q: PrintRequest, plan: FogPlan, cards: FogCard[], index: number, title: string) {
+  doc.addPage({ size: [plan.sheetW * MM, plan.sheetH * MM], margin: 0 })
+  const pad = fogPad(q)
+  for (const card of cards) {
+    const { w, h } = footprint(card)
+    const [x, y] = [q.marginMm + card.placement.x, q.marginMm + card.placement.y]
+    const layer = await cardLayer(q, card, FOG_PX_PER_MM, [])
+    doc.image(layer, (x - pad) * MM, (y - pad) * MM, { width: (w + pad * 2) * MM, height: (h + pad * 2) * MM })
+    for (const label of cardLabels(q, card)) pdfLabel(doc, label, ...onSheet(q, card, label.x, label.y), card.placement.rotated)
+  }
+  if (q.marginMm >= 3) {
+    const caption = `Fog ${index + 1} of ${plan.sheets}   ${cards.map((c) => c.id).join('  ')}   ${title}`
+    doc.fillColor('#555555').fontSize(6).text(caption, q.marginMm * MM, (plan.sheetH - q.marginMm + 1) * MM, {
+      lineBreak: false, width: (plan.sheetW - q.marginMm * 2) * MM, height: 8, ellipsis: true,
+    })
+  }
 }
 
 async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: string, progress: (done: number) => void) {
   const title = `${file.name}`.replace(/\s+/g, ' ')
-  const doc = new PDFDocument({ autoFirstPage: false, compress: true, info: { Title: title, Creator: 'Scenic' } })
+  // The bundled face rather than a PDF base font, so PDF text matches the outlined text in the raster layers.
+  const doc = new PDFDocument({ autoFirstPage: false, compress: true, font: FONT_FILE.regular, info: { Title: title, Creator: 'Scenic' } })
   const out = doc.pipe(createWriteStream(target))
   if (q.marks.overview) await drawOverviewPage(doc, q, file, title)
 
@@ -579,10 +744,9 @@ async function writePdf(q: PrintRequest, file: FileRow, raster: string, target: 
     if (fog) doc.image(fog, sheet.left * MM, sheet.top * MM, { width: sheet.page.w * MM, height: sheet.page.h * MM })
     progress(++done)
   }
-  for (const fog of fogSheets(q)) {
-    doc.addPage({ size: [fog.sheet.w * MM, fog.sheet.h * MM], margin: 0 })
-    await drawFog(doc, q, fog)
-  }
+  const plan = fogPlanFor(q)
+  if (plan.sheets) await drawPlacementPage(doc, q, file, plan)
+  for (const [i, cards] of cardsBySheet(plan).entries()) await drawFogSheet(doc, q, plan, cards, i, title)
   doc.end()
   await finished(out)
 }
@@ -591,10 +755,16 @@ function overlaySvg(q: PrintRequest, sheet: Sheet, overlay: Overlay): string {
   const { left, top } = sheet
   const path = (segments: Segment[]) => segments.map(([a, b, c, d]) => `M${a.toFixed(2)} ${b.toFixed(2)}L${c.toFixed(2)} ${d.toFixed(2)}`).join('')
   const numbers = overlay.numbers
-    .map((n) => `<text x="${n.x.toFixed(2)}" y="${(n.y + q.squareMm * 0.1).toFixed(2)}" font-size="${(q.squareMm * 0.12).toFixed(2)}" text-anchor="middle" font-family="sans-serif">${n.text}</text>`)
+    .map((n) => {
+      const size = q.squareMm * 0.12
+      return `<path d="${textPath(n.text, n.x, n.y + q.squareMm * 0.1 - capHeight(size) / 2, size)}"/>`
+    })
     .join('')
   const notes = overlay.notes
-    .map((n) => `<text transform="translate(${n.x.toFixed(2)} ${n.y.toFixed(2)}) rotate(${n.angle})" text-anchor="${n.anchor}" dominant-baseline="central">${escapeXml(n.text)}</text>`)
+    .map((n) => {
+      const x = n.anchor === 'start' ? textWidth(n.text, NOTE_MM) / 2 : 0
+      return `<path transform="translate(${n.x.toFixed(2)} ${n.y.toFixed(2)}) rotate(${n.angle})" d="${textPath(n.text, x, 0, NOTE_MM)}"/>`
+    })
     .join('')
   const marks = `stroke="${MARK_INK}" stroke-width="${MARK_MM}" fill="none"`
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sheet.w} ${sheet.h}">
@@ -605,7 +775,7 @@ function overlaySvg(q: PrintRequest, sheet: Sheet, overlay: Overlay): string {
       </g>
       <path d="${path(overlay.cuts)}" ${marks}/>
       <path d="${path(overlay.joins)}" ${marks} stroke-dasharray="${MARK_DASH.join(' ')}"/>
-      <g font-family="Helvetica, Arial, sans-serif" font-size="${NOTE_MM.toFixed(3)}" fill="#555555">${notes}</g>
+      <g fill="#555555">${notes}</g>
     </g></svg>`
 }
 
@@ -653,16 +823,32 @@ async function writePngZip(q: PrintRequest, file: FileRow, raster: string, targe
     zip.addBuffer(png, `${safeName(file.name)} ${sheet.page.label}.png`, { compress: false })
     progress(++done)
   }
-  for (const fog of fogSheets(q)) {
-    const { sheet } = fog
-    const pad = fogPad(sheet)
-    const png = await sharp({
-      create: { width: Math.round(sheet.w * pxPerMm), height: Math.round(sheet.h * pxPerMm), channels: 3, background: '#ffffff' },
-    })
-      .composite([{ input: await pieceLayer(q, fog, pxPerMm), left: Math.round((sheet.left - pad) * pxPerMm), top: Math.round((sheet.top - pad) * pxPerMm) }])
+  const blank = (w: number, h: number, px: number) => sharp({ create: { width: Math.round(w * px), height: Math.round(h * px), channels: 3, background: '#ffffff' } })
+  const plan = fogPlanFor(q)
+  if (plan.sheets) {
+    // Only a guide, never cut out, so it can be sharper than a low-resolution map.
+    const px = Math.max(pxPerMm, FOG_PX_PER_MM)
+    const L = placementLayout(q)
+    const map = await sharp(await placementMap(q, file, L))
+      .resize(Math.round(L.view.w * L.scale * px), Math.round(L.view.h * L.scale * px), { fit: 'fill' })
+      .toBuffer()
+    const lines = await rasterSvg(placementSvg(plan, L, placementLabels(plan, L)), L.sheetW, L.sheetH, px)
+    const png = await blank(L.sheetW, L.sheetH, px)
+      .composite([{ input: map, left: Math.round(L.x * px), top: Math.round(L.y * px) }, { input: lines }])
       .png()
       .toBuffer()
-    zip.addBuffer(png, `${safeName(file.name)} ${safeName(sheet.page.label)}.png`, { compress: false })
+    zip.addBuffer(png, `${safeName(file.name)} Fog placement.png`, { compress: false })
+  }
+  // Cards keep the map's resolution so every sheet in the zip prints at the same scale.
+  const pad = fogPad(q)
+  for (const [i, cards] of cardsBySheet(plan).entries()) {
+    const layers = await Promise.all(cards.map(async (card) => ({
+      input: await cardLayer(q, card, pxPerMm, cardLabels(q, card)),
+      left: Math.round((q.marginMm + card.placement.x - pad) * pxPerMm),
+      top: Math.round((q.marginMm + card.placement.y - pad) * pxPerMm),
+    })))
+    const png = await blank(plan.sheetW, plan.sheetH, pxPerMm).composite(layers).png().toBuffer()
+    zip.addBuffer(png, `${safeName(file.name)} Fog sheet ${i + 1}.png`, { compress: false })
   }
   zip.end()
   await finished(out)

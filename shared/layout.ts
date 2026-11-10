@@ -154,6 +154,102 @@ export function fogPieces(area: Rect, sheetW: number, sheetH: number, marginMm: 
   }))
 }
 
+/** Space left between packed pieces: room for scissors, and for each outline's stroke. */
+export const PACK_GUTTER_MM = 4
+
+export interface Placement {
+  sheet: number
+  /** Top-left of the piece within the printable area. */
+  x: number
+  y: number
+  /** Turned a quarter clockwise, so it sits `h` wide and `w` tall. */
+  rotated: boolean
+}
+
+export interface Packing {
+  sheetW: number
+  sheetH: number
+  sheets: number
+  /** One per input size, in input order. */
+  placements: Placement[]
+}
+
+const overlaps = (a: Rect, b: Rect) =>
+  a.x < b.x + b.w - EPSILON && b.x < a.x + a.w - EPSILON && a.y < b.y + b.h - EPSILON && b.y < a.y + a.h - EPSILON
+const contains = (outer: Rect, inner: Rect) =>
+  inner.x >= outer.x - EPSILON && inner.y >= outer.y - EPSILON &&
+  inner.x + inner.w <= outer.x + outer.w + EPSILON && inner.y + inner.h <= outer.y + outer.h + EPSILON
+
+/** MaxRects bookkeeping: carves `used` out of every free rectangle and drops the ones another already holds. */
+function carve(free: Rect[], used: Rect): Rect[] {
+  const next: Rect[] = []
+  for (const f of free) {
+    if (!overlaps(f, used)) {
+      next.push(f)
+      continue
+    }
+    if (used.x > f.x + EPSILON) next.push({ x: f.x, y: f.y, w: used.x - f.x, h: f.h })
+    if (used.x + used.w < f.x + f.w - EPSILON) next.push({ x: used.x + used.w, y: f.y, w: f.x + f.w - used.x - used.w, h: f.h })
+    if (used.y > f.y + EPSILON) next.push({ x: f.x, y: f.y, w: f.w, h: used.y - f.y })
+    if (used.y + used.h < f.y + f.h - EPSILON) next.push({ x: f.x, y: used.y + used.h, w: f.w, h: f.y + f.h - used.y - used.h })
+  }
+  return next.filter((a, i) => !next.some((b, j) => j !== i && contains(b, a) && (!contains(a, b) || j < i)))
+}
+
+type Size = { w: number; h: number }
+
+/** Big pieces first, judged a few ways; whichever packs tightest wins. */
+const PACK_ORDERS: ((a: Size, b: Size) => number)[] = [
+  (a, b) => Math.max(b.w, b.h) - Math.max(a.w, a.h) || b.w * b.h - a.w * a.h,
+  (a, b) => b.w * b.h - a.w * a.h,
+  (a, b) => b.h - a.h || b.w - a.w,
+  (a, b) => b.w - a.w || b.h - a.h,
+]
+
+function packInto(sizes: Size[], byOrder: (a: Size, b: Size) => number, width: number, height: number, gutter: number) {
+  // Each piece claims its gutter on the right and below; the bin grows by one gutter to match.
+  const [binW, binH] = [width + gutter, height + gutter]
+  const bins: Rect[][] = []
+  const placements: Placement[] = new Array(sizes.length)
+  const order = sizes.map((s, i) => ({ w: s.w, h: s.h, i })).sort((a, b) => byOrder(a, b) || a.i - b.i)
+  type Spot = { score: number; bin: number; x: number; y: number; rotated: boolean }
+  const spotIn = (bin: number, w: number, h: number, best: Spot | null) => {
+    for (const f of bins[bin]) {
+      for (const rotated of [false, true]) {
+        const [pw, ph] = rotated ? [h + gutter, w + gutter] : [w + gutter, h + gutter]
+        if (pw > f.w + EPSILON || ph > f.h + EPSILON) continue
+        // Best short side fit: the snuggest corner leaves the most useful space behind.
+        const score = Math.min(f.w - pw, f.h - ph)
+        if (!best || score < best.score - EPSILON) best = { score, bin, x: f.x, y: f.y, rotated }
+      }
+    }
+    return best
+  }
+  for (const { w, h, i } of order) {
+    let best = bins.reduce<Spot | null>((found, _, bin) => spotIn(bin, w, h, found), null)
+    if (!best) {
+      bins.push([{ x: 0, y: 0, w: binW, h: binH }])
+      // Larger than a sheet either way round: it gets a sheet of its own and runs off the edge.
+      best = spotIn(bins.length - 1, w, h, null) ?? { score: 0, bin: bins.length - 1, x: 0, y: 0, rotated: false }
+    }
+    const [pw, ph] = best.rotated ? [h + gutter, w + gutter] : [w + gutter, h + gutter]
+    bins[best.bin] = carve(bins[best.bin], { x: best.x, y: best.y, w: pw, h: ph })
+    placements[i] = { sheet: best.bin, x: best.x, y: best.y, rotated: best.rotated }
+  }
+  return { sheets: bins.length, placements }
+}
+
+/**
+ * Packs pieces onto as few sheets as it can, turning them where that helps.
+ * Keeps the sheet the way round it was given unless the other way saves paper.
+ */
+export function packSheets(sizes: Size[], sheetW: number, sheetH: number, marginMm: number): Packing {
+  const tries = [[sheetW, sheetH], [sheetH, sheetW]].flatMap(([w, h]) => PACK_ORDERS.map((order) => ({
+    sheetW: w, sheetH: h, ...packInto(sizes, order, w - marginMm * 2, h - marginMm * 2, PACK_GUTTER_MM),
+  })))
+  return tries.reduce((best, next) => (next.sheets < best.sheets ? next : best))
+}
+
 export function sheetCount(plane: Plane, spec: PageSpec): number {
   return bestLayout(plane, spec).count
 }
