@@ -56,7 +56,7 @@ Files in a folder named `Overlays`, or with "overlay" in their name, are shown a
 
 **Settings → AI** connects any OpenAI-compatible API with a vision model: OpenRouter with a key, or LM Studio or Ollama on another computer (let it listen on the network and use that computer's address). It is off by default. Each scene's 640 px cover thumbnail is sent, nothing else, and one sentence and a few tags come back. They show on the map page and search finds them; they never change grouping or your own tags.
 
-Runs start from the settings page, which shows how many scenes are waiting and, for OpenRouter, an estimated price. Turn on **Describe new scenes after each scan** to tag new maps automatically. With OpenRouter thumbnails leave your network; with a local server they stay on it. The key is stored in the data folder and never sent to the browser.
+Runs start from the settings page, which shows how many scenes are waiting and, for OpenRouter, an estimated price. Turn on **Describe new scenes after each scan** to tag new maps automatically. With OpenRouter thumbnails leave your network; with a local server they stay on it. The key is stored in the data folder and never sent to the browser. To run a free model on a Mac on your network instead, see [`deploy/mac`](deploy/mac/README.md).
 
 ## How the grid is found
 

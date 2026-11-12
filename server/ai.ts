@@ -207,7 +207,8 @@ async function describe(scene: Scene, s: Stored): Promise<void> {
     body: JSON.stringify({
       model: s.model,
       temperature: 0.2,
-      max_tokens: 400,
+      // Room for models that reason before answering; others stop after about 150 tokens.
+      max_tokens: 2000,
       messages: [{
         role: 'user',
         content: [
