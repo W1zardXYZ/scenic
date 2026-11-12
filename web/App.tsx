@@ -136,7 +136,7 @@ export function App() {
 
   const pageTitle = view === 'print' && group ? `Print ${group.title}`
     : view === 'map' && group ? [group.title, map?.variant].filter(Boolean).join(', ')
-      : view === 'settings' ? `Settings, ${id === 'projects' ? 'Projects' : 'Creators'}`
+      : view === 'settings' ? `Settings, ${id === 'projects' ? 'Projects' : id === 'scanning' ? 'Scanning' : 'Creators'}`
         : view === 'organize' ? 'Organise'
           : view === 'creators' ? 'Creators'
             : view === 'projects' ? 'Projects'
@@ -191,7 +191,7 @@ export function App() {
   } else if (view === 'settings') {
     page = (
       <>
-        <Settings library={library} index={index} tab={id === 'projects' ? 'projects' : 'creators'} prefs={prefs} setPrefs={setPrefs} onFolders={() => setFolders('list')} onChanged={refresh} />
+        <Settings library={library} index={index} tab={id === 'projects' || id === 'scanning' ? id : 'creators'} prefs={prefs} setPrefs={setPrefs} onFolders={() => setFolders('list')} onChanged={refresh} />
         {folders && <Folders status={status} pick={folders === 'pick'} onClose={() => setFolders(null)} onChanged={foldersChanged} />}
       </>
     )

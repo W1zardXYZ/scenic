@@ -68,6 +68,17 @@ if (!(db.prepare('PRAGMA table_info(edit)').all() as { name: string }[]).some((c
 }
 db.exec('CREATE TABLE IF NOT EXISTS profile (kind TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (kind, key))')
 
+db.exec('CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, data TEXT NOT NULL)')
+
+export function readSetting(key: string): unknown {
+  const row = db.prepare('SELECT data FROM setting WHERE key = ?').get(key) as { data: string } | undefined
+  return row ? JSON.parse(row.data) : undefined
+}
+
+export function writeSetting(key: string, value: unknown): void {
+  db.prepare('INSERT INTO setting (key, data) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET data = excluded.data').run(key, JSON.stringify(value))
+}
+
 export type ProfileKind = 'creator' | 'project'
 
 export function readProfiles(kind: ProfileKind): Record<string, Profile> {
@@ -156,7 +167,8 @@ export interface FileRow {
   name: string
   creator: string
   pack: string
-  status: 'pending' | 'ok' | 'failed' | 'sidecar'
+  /** `sidecar` is also used for images too small to be maps; `copy` for a file already indexed elsewhere. */
+  status: 'pending' | 'ok' | 'failed' | 'sidecar' | 'copy'
   error: string | null
   format: string | null
   width: number
@@ -265,14 +277,14 @@ export function readLibrary(): Library {
   const hiddenScenes = new Set(maps.filter((m) => m.hidden).map((m) => m.groupId))
   for (const m of maps) m.hidden = hiddenScenes.has(m.groupId)
   const members = new Map<number, number[]>()
+  const overlays = new Map<number, number[]>()
   for (const m of maps) {
-    const list = members.get(m.groupId)
-    if (list) list.push(m.id)
-    else members.set(m.groupId, [m.id])
+    const into = m.variantKind === 'overlay' ? overlays : members
+    into.set(m.groupId, [...(into.get(m.groupId) ?? []), m.id])
   }
   const groups = (db.prepare('SELECT * FROM grp').all() as unknown as { id: number; title: string; creator: string; pack: string; cover_id: number }[])
     .filter((g) => members.has(g.id))
-    .map((g): MapGroup => ({ id: g.id, title: g.title, creator: g.creator, pack: g.pack, coverId: g.cover_id, mapIds: members.get(g.id)! }))
+    .map((g): MapGroup => ({ id: g.id, title: g.title, creator: g.creator, pack: g.pack, coverId: g.cover_id, mapIds: members.get(g.id)!, overlayIds: overlays.get(g.id) ?? [] }))
   return { maps, groups, creators: readProfiles('creator'), projects: readProfiles('project') }
 }
 

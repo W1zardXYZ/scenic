@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { groupMaps, propagateGrid, guessSquares, similarity, type GroupInput, type Measured } from './group.ts'
+import { groupMaps, propagateGrid, guessSquares, similarity, withoutPreviews, type GroupInput, type Measured } from './group.ts'
 import { parseName } from './names.ts'
 
 function rng(seed: number) {
@@ -252,4 +252,41 @@ test('groupMaps: a hand-set scene overrides detection in both directions', () =>
   const groups = groupMaps([a, b, c])
   assert.equal(groups.length, 2)
   assert.equal(groups.find((g) => g.members.length === 2)?.title, 'Sunken Vault')
+})
+
+test('a small copy of a map is a preview, not a variant', () => {
+  const full = item('Tavern Day', { width: 4200, height: 4200, sigSeed: 41 })
+  const preview = item('Tavern Day small', { width: 1000, height: 1000, sigSeed: 41 })
+  const night = item('Tavern Night', { width: 4200, height: 4200, sigSeed: 41 })
+  assert.deepEqual(withoutPreviews([full, preview, night]).map((m) => m.id), [full.id, night.id])
+  // Half-size but a different picture stays.
+  const other = item('Tavern Cellar', { width: 1000, height: 1000, sigSeed: 99 })
+  assert.equal(withoutPreviews([full, other]).length, 2)
+  // Put in the scene by hand, it stays.
+  const kept = { ...preview, scene: 'Tavern' }
+  assert.equal(withoutPreviews([full, kept]).length, 2)
+})
+
+test('a low-resolution day map is not a preview of a high-resolution night map', () => {
+  const dayLow = item('Ruins Day', { width: 1152, height: 1584, sigSeed: 51 })
+  const nightHigh = item('Ruins Night', { width: 4800, height: 6600, sigSeed: 51 })
+  const dayHigh = item('Ruins Day', { width: 4800, height: 6600, sigSeed: 51 })
+  assert.equal(withoutPreviews([dayLow, nightHigh, dayHigh]).length, 3)
+  // A lone low-resolution night version is a variant too.
+  assert.equal(withoutPreviews([dayHigh, item('Ruins Night', { width: 1152, height: 1584, sigSeed: 51 })]).length, 2)
+})
+
+test('overlays join the scene whose map name they continue', async () => {
+  const { attachOverlays } = await import('./group.ts')
+  const day = item('Mecha Ruins - Forest - Day - 16x22')
+  const night = item('Mecha Ruins - Forest - Night - 16x22', { sigSeed: day.id * 31 })
+  const other = item('Rocky Fissures - Desert - Day')
+  const groups = groupMaps([day, night, other])
+  const head = item('Mecha Ruins - Forest - Night - Open Head - 5x4', { width: 360, height: 288 })
+  const stray = item('Something Else Entirely', { width: 360, height: 288 })
+  const elsewhere = item('Mecha Ruins - Forest - Day - Open Hip', { scope: 'another pack' })
+  const { attached, rest } = attachOverlays(groups, [day, night, other], [head, stray, elsewhere])
+  const mecha = groupOf(groups, day.id)
+  assert.deepEqual(attached.get(mecha), [{ id: head.id, variant: 'Night Open Head' }])
+  assert.deepEqual(rest.map((r) => r.id), [stray.id, elsewhere.id])
 })

@@ -1,3 +1,4 @@
+import type { ScanRules } from '../shared/rules.ts'
 import type { FailedFile, Library, MapEdit, MapRecord, ScanStatus } from '../shared/types.ts'
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
@@ -18,6 +19,8 @@ export const api = {
   status: () => json<ScanStatus>('/api/status'),
   failed: () => json<FailedFile[]>('/api/failed'),
   scan: () => json('/api/scan', send('POST')),
+  rules: () => json<ScanRules>('/api/rules'),
+  saveRules: (rules: ScanRules) => json<ScanRules>('/api/rules', send('PUT', rules)),
   browse: (path?: string) =>
     json<{ path: string; parent: string | null; dirs: string[] }>(`/api/browse?path=${encodeURIComponent(path ?? '')}`),
   addRoot: (path: string) => json('/api/roots', send('POST', { path })),

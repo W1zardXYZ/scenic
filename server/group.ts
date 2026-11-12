@@ -24,6 +24,8 @@ export interface GroupOutput {
 }
 
 const SAME_MAP = 0.8
+const PREVIEW = 0.9
+const PREVIEW_SCALE = 0.5
 const NAMED_FAMILY = 0.45
 const ASPECT_TOLERANCE = 0.01
 const MAX_DIFFERENT_BITS = 0.45
@@ -149,7 +151,66 @@ export function groupMaps(items: GroupInput[]): GroupOutput[] {
     if (list) list.push(item)
     else clusters.set(root, [item])
   })
-  return [...clusters.values()].map(describe)
+  return [...clusters.values()].map(withoutPreviews).filter((c) => c.length).map(describe)
+}
+
+/**
+ * Creators ship small copies of a map as previews. A file showing the same picture as
+ * another of its scene at half the width or less is one, unless its name says what it is:
+ * a lower-resolution version shares another file's name, and a variant such as "Night"
+ * names a condition. Files placed in the scene by hand always stay.
+ */
+export function withoutPreviews(members: GroupInput[]): GroupInput[] {
+  return members.filter((m) => {
+    if (m.scene || members.some((o) => o !== m && o.key === m.key)) return true
+    return !members.some((o) => {
+      if (o === m || m.width > o.width * PREVIEW_SCALE || !sameShape(m, o) || similarity(m.sig, o.sig) < PREVIEW) return false
+      const own = m.tokens.slice(sharedLead(m.tokens, o.tokens))
+      return !own.length || !describesCondition(own)
+    })
+  })
+}
+
+const commonLead = (members: GroupInput[]) => members.reduce((n, m) => Math.min(n, sharedLead(members[0].tokens, m.tokens)), members[0].tokens.length)
+
+/**
+ * Puts each overlay in the scene of the map its name continues: "Ruins - Day - Open Roof"
+ * goes with "Ruins - Day". Its label is what follows the scene's shared name.
+ * Overlays that continue no map's name are returned to be grouped on their own.
+ */
+export function attachOverlays(groups: GroupOutput[], items: GroupInput[], overlays: GroupInput[]): {
+  attached: Map<GroupOutput, { id: number; variant: string }[]>
+  rest: GroupInput[]
+} {
+  const byId = new Map(items.map((i) => [i.id, i]))
+  const scenes = groups.map((group) => {
+    const members = group.members.map((m) => byId.get(m.id)!)
+    return { group, members, scope: members[0].scope, lead: commonLead(members) }
+  })
+  const attached = new Map<GroupOutput, { id: number; variant: string }[]>()
+  const rest: GroupInput[] = []
+  for (const overlay of overlays) {
+    let best: (typeof scenes)[number] | null = null
+    let bestLead = 0
+    for (const scene of scenes) {
+      if (scene.scope !== overlay.scope) continue
+      // The whole of some map's name, or at least the scene's shared name of two words or more.
+      const lead = Math.max(...scene.members.map((m) => {
+        const n = sharedLead(overlay.tokens, m.tokens)
+        return n === m.tokens.length || (n >= scene.lead && n >= 2) ? n : 0
+      }))
+      if (lead > bestLead) [best, bestLead] = [scene, lead]
+    }
+    if (!best) {
+      rest.push(overlay)
+      continue
+    }
+    const words = overlay.tokens.slice(Math.min(best.lead, bestLead))
+    const list = attached.get(best.group) ?? []
+    list.push({ id: overlay.id, variant: titleCase(words.join(' ')) || overlay.tokens.join(' ') })
+    attached.set(best.group, list)
+  }
+  return { attached, rest }
 }
 
 export interface Measured {

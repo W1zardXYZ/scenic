@@ -1,4 +1,5 @@
-export type VariantKind = 'level' | 'lighting' | 'weather' | 'labels' | 'other'
+/** `overlay` marks a piece laid over the scene's maps; overlays are listed apart from the variants. */
+export type VariantKind = 'level' | 'lighting' | 'weather' | 'labels' | 'other' | 'overlay'
 
 export type GridSource = 'manual' | 'vtt' | 'visual' | 'filename' | 'pattern' | 'sibling' | 'guess'
 
@@ -49,6 +50,8 @@ export interface MapGroup {
   pack: string
   coverId: number
   mapIds: number[]
+  /** Overlays of this scene's maps, which are not among `mapIds`. */
+  overlayIds: number[]
 }
 
 export interface Profile {
