@@ -182,7 +182,7 @@ export function applyFilters(library: Library, index: Index, f: Filters, scope: 
   const textMatches = library.groups.filter((g) => {
     if (!inScope(g, scope)) return false
     if (!words.length) return true
-    const text = [g.title, g.pack, g.creator, ...g.mapIds.map((id) => `${index.byId.get(id)?.rel ?? ''} ${index.byId.get(id)?.variant ?? ''} ${index.byId.get(id)?.biomes.join(' ') ?? ''}`)].join(' ').toLowerCase()
+    const text = [g.title, g.pack, g.creator, g.description ?? '', ...(g.suggestedTags ?? []), ...g.mapIds.map((id) => `${index.byId.get(id)?.rel ?? ''} ${index.byId.get(id)?.variant ?? ''} ${index.byId.get(id)?.biomes.join(' ') ?? ''}`)].join(' ').toLowerCase()
     return words.every((w) => text.includes(w))
   })
 

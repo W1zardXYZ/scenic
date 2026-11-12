@@ -1,5 +1,5 @@
 import type { ScanRules } from '../shared/rules.ts'
-import type { FailedFile, Library, MapEdit, MapRecord, ScanStatus } from '../shared/types.ts'
+import type { AiSettings, AiStatus, FailedFile, Library, MapEdit, MapRecord, ScanStatus } from '../shared/types.ts'
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -20,6 +20,13 @@ export const api = {
   failed: () => json<FailedFile[]>('/api/failed'),
   scan: () => json('/api/scan', send('POST')),
   rules: () => json<ScanRules>('/api/rules'),
+  ai: () => json<AiSettings>('/api/ai'),
+  saveAi: (patch: Partial<Omit<AiSettings, 'hasKey'>> & { apiKey?: string | null }) => json<AiSettings>('/api/ai', send('PUT', patch)),
+  aiStatus: () => json<AiStatus>('/api/ai/status'),
+  aiModels: (baseUrl: string, apiKey?: string) => json<{ id: string; name: string; perScene: number | null }[]>('/api/ai/models', send('POST', { baseUrl, apiKey })),
+  runAi: () => json('/api/ai/run', send('POST')),
+  stopAi: () => json('/api/ai/stop', send('POST')),
+  clearAi: () => json('/api/ai/suggestions', send('DELETE')),
   saveRules: (rules: ScanRules) => json<ScanRules>('/api/rules', send('PUT', rules)),
   browse: (path?: string) =>
     json<{ path: string; parent: string | null; dirs: string[] }>(`/api/browse?path=${encodeURIComponent(path ?? '')}`),

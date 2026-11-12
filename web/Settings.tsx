@@ -11,6 +11,7 @@ import { EntityDialog } from './library/EntityDialog.tsx'
 import { creatorHref, projectHref } from './library/Shelves.tsx'
 import { directory, type Entity } from './profiles.ts'
 import { ScanRulesForm } from './ScanRules.tsx'
+import { AiSettingsForm } from './AiSettings.tsx'
 
 function Row({ entity, href, onEdit }: { entity: Entity; href: string; onEdit: () => void }) {
   return (
@@ -66,6 +67,7 @@ export function Settings({ library, index, tab, prefs, setPrefs, onFolders, onCh
             <TabsTrigger value="creators">Creators</TabsTrigger>
             <TabsTrigger value="projects">Projects</TabsTrigger>
             <TabsTrigger value="scanning">Scanning</TabsTrigger>
+            <TabsTrigger value="ai">AI</TabsTrigger>
           </TabsList>
           <TabsContent value="creators">
             <ul>{creators.map((e) => <Row key={e.name} entity={e} href={creatorHref(e)} onEdit={() => setEditing(e)} />)}</ul>
@@ -75,6 +77,9 @@ export function Settings({ library, index, tab, prefs, setPrefs, onFolders, onCh
           </TabsContent>
           <TabsContent value="scanning">
             <ScanRulesForm />
+          </TabsContent>
+          <TabsContent value="ai">
+            <AiSettingsForm onChanged={onChanged} />
           </TabsContent>
         </Tabs>
       </main>

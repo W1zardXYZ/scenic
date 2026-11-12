@@ -52,6 +52,9 @@ export interface MapGroup {
   mapIds: number[]
   /** Overlays of this scene's maps, which are not among `mapIds`. */
   overlayIds: number[]
+  /** Written by the AI connection from the cover; suggestions only, never applied as edits. */
+  description?: string
+  suggestedTags?: string[]
 }
 
 export interface Profile {
@@ -113,4 +116,32 @@ export interface MapEdit {
   tags?: string[] | null
   favorite?: boolean | null
   hidden?: boolean | null
+}
+
+/** The AI connection, as the browser sees it: the key itself never leaves the server. */
+export interface AiSettings {
+  enabled: boolean
+  /** An OpenAI-compatible API, such as https://openrouter.ai/api/v1 or http://my-mac.local:1234/v1. */
+  baseUrl: string
+  model: string
+  /** Tags new scenes after each scan without asking. */
+  auto: boolean
+  hasKey: boolean
+}
+
+export interface AiStatus {
+  running: boolean
+  done: number
+  total: number
+  /** Why the last run stopped early, if it did. */
+  error: string
+  /** Visible scenes without a description yet. */
+  waiting: number
+  described: number
+  /** Scenes whose last attempt failed; each is tried again on later runs, three times at most. */
+  failed: number
+  /** Thumbnails go to another network: true for a hosted API, false for a server on this one. */
+  leavesNetwork: boolean
+  /** Estimated price in US dollars for the waiting scenes; null when the provider publishes no prices. */
+  estimate: number | null
 }
