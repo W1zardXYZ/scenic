@@ -569,6 +569,9 @@ async function run(): Promise<void> {
   regroup()
 }
 
+/** Work that follows a finished scan, such as AI tagging; registered by those modules to keep this one free of them. */
+export const afterScan: (() => void)[] = []
+
 export async function startScan(): Promise<void> {
   if (state.running) {
     again = true
@@ -587,6 +590,7 @@ export async function startScan(): Promise<void> {
     state.phase = 'idle'
     state.current = ''
   }
+  for (const next of afterScan) next()
 }
 
 export function startSchedule(): void {

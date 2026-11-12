@@ -20,6 +20,7 @@ import { db, getFile, hideScene, libraryVersion, markChanged, type ProfileKind, 
 import { exportMap, exportName, exportZip, type ExportFormat, FORMATS, safeName } from './export.ts'
 import { generate, type PrintPart, type PrintRequest, validatePrint } from './print.ts'
 import { applyEdit, dissolveNode, failedFiles, flattenSingles, moveInto, moveNode, readRules, regroup, saveRules, type TreeNode, saveGrid, scanStatus, startSchedule, startScan, thumbPath } from './scan.ts'
+import { aiSettings, aiStatus, clearSuggestions, listModels, type AiPatch, saveAiSettings, sceneSuggestions, startAi, stopAi } from './ai.ts'
 import { MAX_RULE_LENGTH, MAX_RULE_WORDS, normaliseRules, RULE_LISTS } from '../shared/rules.ts'
 import { cached, cachePath, clearPartialFiles, localImage } from './source.ts'
 
@@ -42,7 +43,13 @@ app.get('/api/library', (c) => {
   const etag = `"${libraryVersion()}"`
   if (c.req.header('if-none-match') === etag) return c.body(null, 304)
   c.header('etag', etag)
-  return c.json(readLibrary())
+  const library = readLibrary()
+  const suggestions = sceneSuggestions()
+  for (const group of library.groups) {
+    const s = suggestions.get(group.id)
+    if (s) Object.assign(group, { description: s.description, suggestedTags: s.tags })
+  }
+  return c.json(library)
 })
 
 app.get('/api/status', (c) => c.json(scanStatus()))
@@ -65,6 +72,59 @@ app.put('/api/rules', async (c) => {
   const rules = normaliseRules(body)
   saveRules(rules)
   return c.json(rules)
+})
+
+const validUrl = (v: unknown) => {
+  if (typeof v !== 'string' || v.length > 300) return false
+  try {
+    return ['http:', 'https:'].includes(new URL(v).protocol)
+  } catch {
+    return false
+  }
+}
+
+app.get('/api/ai', (c) => c.json(aiSettings()))
+app.get('/api/ai/status', async (c) => c.json(await aiStatus()))
+
+app.put('/api/ai', async (c) => {
+  const body = await c.req.json<AiPatch>().catch(() => null)
+  const optional = (v: unknown, ok: (v: unknown) => boolean) => v === undefined || ok(v)
+  const valid = body &&
+    optional(body.enabled, (v) => typeof v === 'boolean') &&
+    optional(body.auto, (v) => typeof v === 'boolean') &&
+    optional(body.baseUrl, validUrl) &&
+    optional(body.model, (v) => typeof v === 'string' && v.length <= 200) &&
+    optional(body.apiKey, (v) => v === null || (typeof v === 'string' && v.length <= 500))
+  if (!valid) return c.json({ error: 'Check the address, model and key' }, 400)
+  return c.json(saveAiSettings(body))
+})
+
+/** Lists models for an address being typed in, before it is saved; the saved key is used unless one is given. */
+app.post('/api/ai/models', async (c) => {
+  const body: { baseUrl?: string; apiKey?: string } = await c.req.json().catch(() => ({}))
+  if (body.baseUrl !== undefined && !validUrl(body.baseUrl)) return c.json({ error: 'Enter an http or https address' }, 400)
+  try {
+    const baseUrl = body.baseUrl?.replace(/\/+$/, '') ?? aiSettings().baseUrl
+    // The saved key only ever goes to the saved address, never to one typed in here.
+    const sameServer = baseUrl === aiSettings().baseUrl
+    const models = await listModels(baseUrl, body.apiKey || (sameServer ? undefined : ''))
+    return c.json(models.filter((m) => m.vision).slice(0, 500))
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 502)
+  }
+})
+
+app.post('/api/ai/run', (c) => {
+  void startAi()
+  return c.json({ ok: true })
+})
+app.post('/api/ai/stop', (c) => {
+  stopAi()
+  return c.json({ ok: true })
+})
+app.delete('/api/ai/suggestions', (c) => {
+  clearSuggestions()
+  return c.json({ ok: true })
 })
 
 const inBrowseRoot = (path: string) => {

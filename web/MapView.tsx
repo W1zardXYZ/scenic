@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Download, EyeOff, FileArchive, Heart, Pencil, Printer } from 'lucide-react'
 import { toast } from 'sonner'
 import type { GridSource, Library, MapRecord, VariantKind } from '../shared/types.ts'
+import { Badge } from '@/components/ui/badge'
 import { GradeBadge, Hint, IconButton, IconToggle, SelectField, SliderField } from '@/components/controls'
 import { Trail } from '@/components/trail'
 import { Button } from '@/components/ui/button'
@@ -293,6 +294,18 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
               <IconToggle label={map.hidden ? 'Hidden, click to show' : 'Hide from the library'} icon={EyeOff} pressed={map.hidden} onPressedChange={toggleHidden} />
             </div>
           </header>
+
+          {group.description && (
+            <section aria-label="Suggested by AI" className="flex flex-col gap-2">
+              <p className="text-sm text-pretty">{group.description}</p>
+              {!!group.suggestedTags?.length && (
+                <ul className="flex flex-wrap gap-1">
+                  {group.suggestedTags.map((tag) => <li key={tag}><Badge variant="secondary">{tag}</Badge></li>)}
+                </ul>
+              )}
+              <p className="text-xs text-muted-foreground">Suggested by AI from the cover</p>
+            </section>
+          )}
 
           <dl className="grid grid-cols-3 gap-3">
             <Stat label="Squares">{Math.round(facts.cols)} × {Math.round(facts.rows)}</Stat>
