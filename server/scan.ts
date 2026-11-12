@@ -2,13 +2,14 @@ import { mkdirSync } from 'node:fs'
 import { opendir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, posix, relative, sep } from 'node:path'
 import { isWithin, joinPath, leafName, parentPath, rebasePath } from '../shared/tree.ts'
+import { normaliseRules, type ScanRules } from '../shared/rules.ts'
 import { projectKey } from '../shared/types.ts'
 import type { GridType, MapEdit, Root, ScanStatus } from '../shared/types.ts'
 import { analyzeImage } from './analyze.ts'
 import { DATA_DIR, RESCAN_MS, WORKERS } from './config.ts'
-import { db, editKey, type FileRow, getFile, markChanged, deleteProfile, moveEdit, moveProfile, readEditLooks, readEdits, readProfiles, transaction, writeEdit } from './db.ts'
-import { differingBits, groupMaps, guessSquares, type GroupInput, type Measured, propagateGrid, signBits, similarity } from './group.ts'
-import { classify, folderChain, type ParsedName, isLikelyMap, mentions, parseName, provenance } from './names.ts'
+import { db, editKey, type FileRow, getFile, markChanged, deleteProfile, moveEdit, moveProfile, readEditLooks, readEdits, readProfiles, readSetting, transaction, writeEdit, writeSetting } from './db.ts'
+import { attachOverlays, differingBits, groupMaps, guessSquares, type GroupInput, type Measured, propagateGrid, signBits, similarity } from './group.ts'
+import { classify, folderChain, type ParsedName, isLikelyMap, isOverlay, mentions, parseName, provenance, statedSize, useRules } from './names.ts'
 import { listZip, localImage, readVtt } from './source.ts'
 
 export const THUMB_DIR = join(DATA_DIR, 'thumbs')
@@ -21,6 +22,18 @@ const VTT = new Set(['.dd2vtt', '.df2vtt', '.uvtt'])
 const IGNORED = /^(?:\.|@eaDir$|#recycle$|#snapshot$|\$RECYCLE\.BIN$|__MACOSX$|System Volume Information$)/
 const MIN_SIDE = 800
 const REGROUP_MIN_MS = 5000
+
+export const readRules = (): ScanRules => normaliseRules(readSetting('rules'))
+useRules(readRules())
+
+/** Saves new scan rules and rescans; a rescan reads names only, so it never re-decodes maps already analysed. */
+export function saveRules(rules: ScanRules): void {
+  writeSetting('rules', rules)
+  useRules(rules)
+  void startScan()
+}
+
+const folderSegments = (f: Pick<FileRow, 'rel'>) => f.rel.split('/').slice(1, -1)
 
 const state = { running: false, phase: 'idle' as ScanStatus['phase'], done: 0, total: 0, current: '' }
 const offline = new Set<number>()
@@ -95,12 +108,16 @@ function record(rootId: number, rootName: string, found: Found) {
   return `${found.path}\0${found.entry}`
 }
 
-async function scanRoot(root: Root): Promise<void> {
+/**
+ * Records the maps under a root. `relist` re-reads unchanged zips too, which new scan rules need
+ * to find files they no longer skip. Returns whether every folder and zip was read.
+ */
+async function scanRoot(root: Root, relist: boolean): Promise<boolean> {
   const info = await stat(root.path).catch(() => null)
   if (!info?.isDirectory()) {
     // A share that dropped off the network must not wipe the index.
     offline.add(root.id)
-    return
+    return false
   }
   offline.delete(root.id)
   const rootName = basename(root.path)
@@ -116,16 +133,18 @@ async function scanRoot(root: Root): Promise<void> {
       const stem = name.slice(0, -4)
       const rows = inZip.all(path) as { entry: string }[]
       const unchanged = rows.length && (known.get(path) as { mtime: number })?.mtime === zipInfo.mtimeMs
-      if (unchanged) {
+      if (unchanged && !relist) {
         // Skip rules may have changed since the zip was read; anything they now exclude is left unseen and removed.
         for (const row of rows) {
           const parts = row.entry.split('/').filter(Boolean)
-          if (isLikelyMap(parts.slice(0, -1), parts.at(-1)!.replace(/\.[^.]+$/, ''))) seen.add(`${path}\0${row.entry}`)
+          if (isLikelyMap([...dirs, stem, ...parts.slice(0, -1)], parts.at(-1)!.replace(/\.[^.]+$/, ''))) seen.add(`${path}\0${row.entry}`)
         }
         return
       }
       const entries = await listZip(path).catch((error) => {
         console.error(`Cannot read ${path}:`, error.message)
+        // Keeps what was indexed from it, rather than treating an unreadable zip as emptied.
+        for (const row of rows) seen.add(`${path}\0${row.entry}`)
         return []
       })
       transaction(() => {
@@ -134,7 +153,7 @@ async function scanRoot(root: Root): Promise<void> {
           const parts = entry.name.split('/').filter(Boolean)
           const file = parts.at(-1)!
           const fileStem = file.slice(0, -extname(file).length)
-          if (!kind || !isLikelyMap(parts.slice(0, -1), fileStem)) continue
+          if (!kind || !isLikelyMap([...dirs, stem, ...parts.slice(0, -1)], fileStem)) continue
           seen.add(record(root.id, rootName, {
             path, entry: entry.name, kind, bytes: entry.bytes, mtime: zipInfo.mtimeMs,
             segments: [...dirs, stem, ...parts], stem: fileStem,
@@ -154,13 +173,43 @@ async function scanRoot(root: Root): Promise<void> {
   })
 
   // Only an exhaustive walk that found something can prove files are gone.
-  if (!complete || !seen.size) return
+  if (!complete || !seen.size) return complete
   const rows = db.prepare('SELECT id, path, entry FROM file WHERE root_id = ?').all(root.id) as unknown as Pick<FileRow, 'id' | 'path' | 'entry'>[]
   const gone = rows.filter((r) => !seen.has(`${r.path}\0${r.entry}`))
   transaction(() => {
     for (const row of gone) db.prepare('DELETE FROM file WHERE id = ?').run(row.id)
   })
   await Promise.all(gone.flatMap((r) => [rm(thumbPath(r.id, 'large'), { force: true }), rm(thumbPath(r.id, 'small'), { force: true })]))
+  return true
+}
+
+/** Images set aside as too small get another look once a rule makes them overlays. */
+function retryOverlays(): void {
+  const small = db.prepare(`SELECT id, rel, name FROM file WHERE status = 'sidecar' AND kind = 'image' AND width IS NULL`).all() as unknown as Pick<FileRow, 'id' | 'rel' | 'name'>[]
+  const retry = small.filter((f) => isOverlay(folderSegments(f), f.name))
+  transaction(() => {
+    for (const f of retry) db.prepare(`UPDATE file SET status = 'pending' WHERE id = ?`).run(f.id)
+  })
+}
+
+/**
+ * A pack kept both zipped and unpacked, or in two zips, is one map: only one copy is
+ * analysed, the loose file first since it is the faster to read. A copy whose original
+ * is gone or failed is analysed after all.
+ */
+function skipCopies(): void {
+  const rows = db.prepare(`SELECT id, entry, kind, name, bytes, status FROM file WHERE status IN ('pending', 'ok', 'copy')`).all() as unknown as Pick<FileRow, 'id' | 'entry' | 'kind' | 'name' | 'bytes' | 'status'>[]
+  const original = new Map<string, number>()
+  const ordered = [...rows].sort((a, b) => Number(b.status === 'ok') - Number(a.status === 'ok') || Number(!!a.entry) - Number(!!b.entry) || a.id - b.id)
+  transaction(() => {
+    for (const row of ordered) {
+      const key = `${row.kind}\0${row.name}\0${row.bytes}`
+      const isCopy = original.has(key)
+      if (!isCopy) original.set(key, row.id)
+      if (isCopy && row.status === 'pending') db.prepare(`UPDATE file SET status = 'copy' WHERE id = ?`).run(row.id)
+      else if (!isCopy && row.status === 'copy') db.prepare(`UPDATE file SET status = 'pending' WHERE id = ?`).run(row.id)
+    }
+  })
 }
 
 /** Attaches each VTT file to the images of the same map; lone VTT files are maps themselves. */
@@ -193,9 +242,10 @@ async function analyzeOne(id: number): Promise<void> {
   const file = getFile(id)!
   try {
     const input = await localImage(file)
-    const result = await analyzeImage(input, { large: thumbPath(id, 'large'), small: thumbPath(id, 'small') })
-    if (Math.min(result.width, result.height) < MIN_SIDE) {
-      await Promise.all([rm(thumbPath(id, 'large'), { force: true }), rm(thumbPath(id, 'small'), { force: true })])
+    // Overlays are often a few squares of a small VTT export, far under the size of a map.
+    const minSide = isOverlay(folderSegments(file), file.name) ? 0 : MIN_SIDE
+    const result = await analyzeImage(input, { large: thumbPath(id, 'large'), small: thumbPath(id, 'small') }, minSide)
+    if (!result) {
       db.prepare(`UPDATE file SET status = 'sidecar' WHERE id = ?`).run(id)
       return
     }
@@ -212,14 +262,12 @@ async function analyzeOne(id: number): Promise<void> {
         }
       }
     }
-    const named = parseName(file.name, file.rel.split('/').slice(1, -1))
-    const hasGrid = named.grid === false ? false : named.grid === true || !!result.period
     db.prepare(`UPDATE file SET status = 'ok', error = NULL, format = ?, width = ?, height = ?, ink = ?, color = ?,
-        colors = ?, sig = ?, period_x = ?, period_y = ?, phase_x = ?, phase_y = ?, has_grid = ?, vtt_cols = ?,
+        colors = ?, sig = ?, period_x = ?, period_y = ?, phase_x = ?, phase_y = ?, vtt_cols = ?,
         vtt_rows = ?, walls = ?, lights = ?, hex_size = ?, hex_pointy = ?, tile_period = ? WHERE id = ?`).run(
       result.format, result.width, result.height, result.ink, result.color, JSON.stringify(result.colors),
       new Uint8Array(result.sig.buffer), result.period?.x ?? null, result.period?.y ?? null,
-      result.period?.phaseX ?? null, result.period?.phaseY ?? null, hasGrid ? 1 : 0,
+      result.period?.phaseX ?? null, result.period?.phaseY ?? null,
       vtt?.cols ?? null, vtt?.rows ?? null, vtt?.walls ?? 0, vtt?.lights ?? 0,
       result.lattice.hex?.size ?? null, result.lattice.hex ? Number(result.lattice.hex.pointy) : null, result.lattice.tile?.period ?? null, id,
     )
@@ -231,13 +279,16 @@ async function analyzeOne(id: number): Promise<void> {
 
 const MAX_TILE_COLS = 80
 
-function measure(f: FileRow, named: ParsedName): Measured {
+/** `trustName` puts a size in the file name above a measured grid, for overlays too small to measure reliably. */
+function measure(f: FileRow, named: ParsedName, trustName = false): Measured {
   const base = { id: f.id, width: f.width, height: f.height, offsetX: 0, offsetY: 0, gridType: 'square' as GridType }
   const hexName = /(?<![a-z])hex(?![a-z])/i.test(f.name)
   const hexType: GridType = f.hex_pointy === 0 ? 'hex' : 'hexPointy'
   if (f.user_cols && f.user_rows) {
     return { ...base, cols: f.user_cols, rows: f.user_rows, offsetX: f.user_offset_x ?? 0, offsetY: f.user_offset_y ?? 0, source: 'manual', gridType: f.user_grid_type ?? 'square' }
   }
+  const stated = trustName ? statedSize(f.name) : null
+  if (stated) return { ...base, ...stated, source: 'filename' }
   if (f.period_x && f.period_y) {
     // A stated resolution within measuring error is the exact figure.
     const stated = named.ppi && Math.abs(f.period_x / named.ppi - 1) < 0.01 ? named.ppi : null
@@ -263,7 +314,6 @@ function measure(f: FileRow, named: ParsedName): Measured {
   return { ...base, ...guessSquares(f.width, f.height), source: 'guess', gridType }
 }
 
-const folderSegments = (f: FileRow) => f.rel.split('/').slice(1, -1)
 
 /** Works out each file's creator and project from the whole library's folder structure. */
 function placeFiles(rows: FileRow[]): Map<number, { creator: string; pack: string }> {
@@ -342,7 +392,12 @@ export function regroup(): void {
     if (edit.pack !== undefined) place.pack = edit.pack ?? ''
   }
   const names = new Map(rows.map((f) => [f.id, parseName(f.name, folderSegments(f))]))
-  const inputs = rows.map((f): GroupInput => {
+  // Read here rather than at analysis, so changed scan words apply without decoding anything again.
+  const gridded = (f: FileRow) => {
+    const { grid } = names.get(f.id)!
+    return grid === false ? false : grid === true || !!f.period_x
+  }
+  const toInput = (f: FileRow): GroupInput => {
     const parsed = names.get(f.id)!
     const { creator, pack } = places.get(f.id)!
     return {
@@ -356,30 +411,47 @@ export function regroup(): void {
       width: f.width,
       height: f.height,
       sig: new Int8Array(f.sig!.buffer, f.sig!.byteOffset, f.sig!.byteLength),
-      hasGrid: !!f.has_grid,
+      hasGrid: gridded(f),
       time: f.time,
       scene: editOf(f).scene ?? undefined,
     }
-  })
-  const groups = groupMaps(inputs)
+  }
+  const overlayIds = new Set(rows.filter((f) => isOverlay(folderSegments(f), f.name)).map((f) => f.id))
+  const inputs = rows.filter((f) => !overlayIds.has(f.id)).map(toInput)
+  const mapGroups = groupMaps(inputs)
+  const { attached, rest } = attachOverlays(mapGroups, inputs, rows.filter((f) => overlayIds.has(f.id)).map(toInput))
+  // Overlays without a map of their own are shown as scenes, so nothing disappears.
+  const groups = [...mapGroups, ...groupMaps(rest)]
 
   transaction(() => {
     db.exec('DELETE FROM grp')
     db.exec('UPDATE file SET group_id = NULL')
     const addGroup = db.prepare('INSERT INTO grp (title, creator, pack, cover_id) VALUES (?, ?, ?, ?)')
     const setMember = db.prepare(`UPDATE file SET group_id = ?, variant = ?, variant_kind = ?, variant_order = ?, creator = ?, pack = ?,
-      cols = ?, rows = ?, offset_x = ?, offset_y = ?, grid_source = ?, grid_type = ?, tags = ?, edited = ? WHERE id = ?`)
+      cols = ?, rows = ?, offset_x = ?, offset_y = ?, grid_source = ?, grid_type = ?, tags = ?, edited = ?, has_grid = ?, labelled = ? WHERE id = ?`)
     for (const group of groups) {
       const { creator, pack } = places.get(group.members[0].id)!
       const { lastInsertRowid } = addGroup.run(group.title, creator, pack, group.coverId)
       const measured = new Map(propagateGrid(group.members.map((m) => measure(byId.get(m.id)!, names.get(m.id)!))).map((m) => [m.id, m]))
       for (const member of group.members) {
         const m = measured.get(member.id)!
-        const edit = editOf(byId.get(member.id)!)
+        const file = byId.get(member.id)!
+        const edit = editOf(file)
         setMember.run(
           lastInsertRowid, edit.variant ?? member.variant, edit.kind ?? member.kind, edit.order ?? member.order, creator, pack,
           m.cols, m.rows, m.offsetX, m.offsetY, m.source, m.gridType, edit.tags ? JSON.stringify(edit.tags) : null,
-          isCorrected(edit) ? 1 : 0, member.id,
+          isCorrected(edit) ? 1 : 0, gridded(file) ? 1 : 0, names.get(file.id)!.labelled ? 1 : 0, member.id,
+        )
+      }
+      // Measured on their own: an overlay's grid says nothing about the map's, nor the other way round.
+      for (const overlay of attached.get(group) ?? []) {
+        const file = byId.get(overlay.id)!
+        const m = measure(file, names.get(file.id)!, true)
+        const edit = editOf(file)
+        setMember.run(
+          lastInsertRowid, edit.variant ?? overlay.variant, 'overlay', 0, creator, pack,
+          m.cols, m.rows, m.offsetX, m.offsetY, m.source, m.gridType, edit.tags ? JSON.stringify(edit.tags) : null,
+          isCorrected(edit) ? 1 : 0, gridded(file) ? 1 : 0, names.get(file.id)!.labelled ? 1 : 0, file.id,
         )
       }
     }
@@ -461,8 +533,15 @@ async function run(): Promise<void> {
   const roots = db.prepare('SELECT id, path FROM root').all() as unknown as Root[]
   state.phase = 'walking'
   state.done = state.total = 0
-  for (const root of roots) await scanRoot(root)
+  const rules = readRules()
+  const relist = JSON.stringify(readSetting('rulesListed')) !== JSON.stringify(rules)
+  let complete = true
+  for (const root of roots) complete = (await scanRoot(root, relist)) && complete
+  // Until every zip has been re-read under these rules, later scans keep re-reading them.
+  if (relist && complete) writeSetting('rulesListed', rules)
   pairSidecars()
+  skipCopies()
+  retryOverlays()
 
   const pending = db.prepare(`SELECT id FROM file WHERE status = 'pending'`).all() as { id: number }[]
   state.phase = 'analyzing'

@@ -19,7 +19,8 @@ import type { GridType, MapEdit } from '../shared/types.ts'
 import { db, getFile, hideScene, libraryVersion, markChanged, type ProfileKind, readLibrary, writeEdit, writeProfile } from './db.ts'
 import { exportMap, exportName, exportZip, type ExportFormat, FORMATS, safeName } from './export.ts'
 import { generate, type PrintPart, type PrintRequest, validatePrint } from './print.ts'
-import { applyEdit, dissolveNode, failedFiles, flattenSingles, moveInto, moveNode, regroup, type TreeNode, saveGrid, scanStatus, startSchedule, startScan, thumbPath } from './scan.ts'
+import { applyEdit, dissolveNode, failedFiles, flattenSingles, moveInto, moveNode, readRules, regroup, saveRules, type TreeNode, saveGrid, scanStatus, startSchedule, startScan, thumbPath } from './scan.ts'
+import { MAX_RULE_LENGTH, MAX_RULE_WORDS, normaliseRules, RULE_LISTS } from '../shared/rules.ts'
 import { cached, cachePath, clearPartialFiles, localImage } from './source.ts'
 
 const GRID_TYPES: GridType[] = ['square', 'hex', 'hexPointy']
@@ -50,6 +51,20 @@ app.get('/api/failed', (c) => c.json(failedFiles()))
 app.post('/api/scan', (c) => {
   void startScan()
   return c.json({ ok: true })
+})
+
+app.get('/api/rules', (c) => c.json(readRules()))
+
+app.put('/api/rules', async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null)
+  const valid = body && RULE_LISTS.every((list) => {
+    const words = body[list]
+    return Array.isArray(words) && words.length <= MAX_RULE_WORDS && words.every((w) => typeof w === 'string' && w.length <= MAX_RULE_LENGTH)
+  })
+  if (!valid) return c.json({ error: `Each list takes up to ${MAX_RULE_WORDS} entries of up to ${MAX_RULE_LENGTH} characters` }, 400)
+  const rules = normaliseRules(body)
+  saveRules(rules)
+  return c.json(rules)
 })
 
 const inBrowseRoot = (path: string) => {

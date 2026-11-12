@@ -48,7 +48,9 @@ Scenic has no user accounts and is meant for a home network. Set `SCENIC_PASSWOR
 - **VTT files:** `.dd2vtt`, `.uvtt`, `.df2vtt`
 - **Archives:** `.zip`
 
-Other archive types, such as `.rar` and `.7z`, are skipped. Folders such as `Tokens` and `Music`, cover art, and images under 800 px are ignored.
+Other archive types, such as `.rar` and `.7z`, are skipped. Folders such as `Tokens` and `Music`, cover art, stat blocks and images under 800 px are ignored. **Settings → Scanning** edits these words: folders and files to skip or always include, extra words for gridded, gridless, labelled and unlabelled, and variant words. Saving rescans names only, so it never decodes maps again.
+
+Files in a folder named `Overlays`, or with "overlay" in their name, are shown as overlays of the scene whose map name they continue, whatever their size. Print and VTT exports of the same map, such as `Maps - 300 DPI (Print)` beside a 72 DPI copy, are one scene with a version for each resolution.
 
 ## How the grid is found
 

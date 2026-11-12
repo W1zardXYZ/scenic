@@ -10,6 +10,7 @@ import { Avatar } from './library/EntityCards.tsx'
 import { EntityDialog } from './library/EntityDialog.tsx'
 import { creatorHref, projectHref } from './library/Shelves.tsx'
 import { directory, type Entity } from './profiles.ts'
+import { ScanRulesForm } from './ScanRules.tsx'
 
 function Row({ entity, href, onEdit }: { entity: Entity; href: string; onEdit: () => void }) {
   return (
@@ -64,12 +65,16 @@ export function Settings({ library, index, tab, prefs, setPrefs, onFolders, onCh
           <TabsList className="w-full">
             <TabsTrigger value="creators">Creators</TabsTrigger>
             <TabsTrigger value="projects">Projects</TabsTrigger>
+            <TabsTrigger value="scanning">Scanning</TabsTrigger>
           </TabsList>
           <TabsContent value="creators">
             <ul>{creators.map((e) => <Row key={e.name} entity={e} href={creatorHref(e)} onEdit={() => setEditing(e)} />)}</ul>
           </TabsContent>
           <TabsContent value="projects">
             <ul>{[...projects.filter((e) => e.kind === 'creator'), ...everyProject].map((e) => <Row key={`${e.kind}/${e.creator}/${e.path}`} entity={e} href={projectHref(e)} onEdit={() => setEditing(e)} />)}</ul>
+          </TabsContent>
+          <TabsContent value="scanning">
+            <ScanRulesForm />
           </TabsContent>
         </Tabs>
       </main>

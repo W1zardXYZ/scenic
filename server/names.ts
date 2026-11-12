@@ -1,6 +1,7 @@
 // Reads what creators encode in file and folder names.
 
 import { levelOf } from '../shared/levels.ts'
+import { DEFAULT_RULES, nameMatcher, type ScanRules, wordMatcher } from '../shared/rules.ts'
 import type { VariantKind } from '../shared/types.ts'
 
 export { levelOf }
@@ -28,6 +29,48 @@ const GRID = /(?:\bgrid(?:ded|s)?\b|\bgrided\b|(?<![a-z])gr(?![a-z]))/i
 const UNLABELLED = /\b(?:un[\s_-]*(?:labell?ed|keyed|numbered)|no[\s_-]*(?:labels?|text|numbers?))\b/i
 const LABELLED = /\b(?:labell?ed|keyed|numbered)\b/i
 
+/** The size a name states in squares, however small: overlays can be a single square across. */
+export function statedSize(stem: string): { cols: number; rows: number } | null {
+  const size = SIZE.exec(stem)
+  if (!size) return null
+  const [cols, rows] = [Number(size[1]), Number(size[2])]
+  return cols >= 1 && rows >= 1 && cols <= MAX_SQUARES && rows <= MAX_SQUARES ? { cols, rows } : null
+}
+
+interface Compiled {
+  skipFolder: RegExp | null
+  skipFile: RegExp | null
+  include: RegExp | null
+  gridded: RegExp | null
+  gridless: RegExp | null
+  labelled: RegExp | null
+  unlabelled: RegExp | null
+  variants: Set<string>
+  overlays: RegExp | null
+}
+
+const compile = (rules: ScanRules): Compiled => ({
+  skipFolder: nameMatcher(rules.skipFolders),
+  skipFile: wordMatcher(rules.skipFiles),
+  include: wordMatcher(rules.include),
+  gridded: wordMatcher(rules.gridded),
+  gridless: wordMatcher(rules.gridless),
+  labelled: wordMatcher(rules.labelled),
+  unlabelled: wordMatcher(rules.unlabelled),
+  variants: new Set(rules.variants.flatMap((w) => w.toLowerCase().split(/[\s_-]+/)).filter(Boolean)),
+  overlays: wordMatcher(rules.overlays),
+})
+
+let current = compile(DEFAULT_RULES)
+
+/** Every later reading of names follows these rules. */
+export function useRules(rules: ScanRules): void {
+  current = compile(rules)
+}
+
+const test = (pattern: RegExp | null, text: string) => !!pattern && pattern.test(text)
+const strip = (pattern: RegExp | null, text: string) => (pattern ? text.replace(new RegExp(pattern.source, 'giu'), ' ') : text)
+
 export function parseName(stem: string, dirs: string[] = []): ParsedName {
   let text = stem
   const size = SIZE.exec(text)
@@ -48,21 +91,30 @@ export function parseName(stem: string, dirs: string[] = []): ParsedName {
     ppi ??= Number(attached[2])
     normalised = normalised.replace(GRID_PPI, '$1')
   }
+  const { gridded, gridless, labelled: labelWords, unlabelled: unlabelWords } = current
+  const isGridless = (s: string) => NO_GRID.test(s) || test(gridless, s)
+  const isGridded = (s: string) => GRID.test(s) || test(gridded, s)
+  const isUnlabelled = (s: string) => UNLABELLED.test(s) || test(unlabelWords, s)
+  const isLabelled = (s: string) => LABELLED.test(s) || test(labelWords, s)
+
   let grid: boolean | null = null
-  if (NO_GRID.test(normalised)) grid = false
-  else if (GRID.test(normalised)) grid = true
-  text = normalised.replace(NO_GRID, ' ').replace(GRID, ' ')
+  if (isGridless(normalised)) grid = false
+  else if (isGridded(normalised)) grid = true
+  // Gridless words first: "no grid" contains "grid".
+  text = strip(gridded, strip(gridless, normalised.replace(NO_GRID, ' ')).replace(GRID, ' '))
 
   const folder = dirs.join('/').replace(/_/g, ' ')
-  if (grid === null && NO_GRID.test(folder)) grid = false
-  else if (grid === null && GRID.test(folder)) grid = true
+  if (grid === null && isGridless(folder)) grid = false
+  else if (grid === null && isGridded(folder)) grid = true
 
-  const labelled = !UNLABELLED.test(text) && (LABELLED.test(text) || (!UNLABELLED.test(folder) && LABELLED.test(folder)))
+  const labelled = !isUnlabelled(text) && (isLabelled(text) || (!isUnlabelled(folder) && isLabelled(folder)))
+  // Label words stay out of the key, so labelled and unlabelled copies share it.
+  const unlabelledText = strip(labelWords, strip(unlabelWords, text))
   const words = text.split(/[\s[\](){},]+|\s-\s/).filter((t) => /[\p{L}\p{N}]/u.test(t))
   const version = words.find((t) => VERSION.test(t)) ?? ''
   const tokens = words.filter((t) => !VERSION.test(t))
-  const key = tokens
-    .filter((t) => !LABELLED.test(t) && !UNLABELLED.test(t))
+  const key = unlabelledText.split(/[\s[\](){},]+|\s-\s/)
+    .filter((t) => /[\p{L}\p{N}]/u.test(t) && !VERSION.test(t) && !LABELLED.test(t) && !UNLABELLED.test(t))
     .join(' ')
     .toLowerCase()
   return { tokens, version, key, cols, rows, ppi, grid, labelled }
@@ -75,11 +127,20 @@ const GENERIC = new Set([
   'archive', 'volume1', 'share', 'new folder', 'foundry', 'foundryvtt', 'roll20', 'fantasy grounds', 'dd2vtt',
   'uvtt', 'universal vtt', 'ready-to-play', 'jpg', 'jpeg', 'png', 'webp', 'variants', 'variations', 'print',
   'hi res', 'hires', 'high res', 'low res', 'labelled', 'unlabelled', 'labeled', 'unlabeled', 'players', 'gm',
+  'other', 'others', 'misc', 'miscellaneous', 'various', 'overlay', 'overlays',
 ])
+/** Resolution and format notes, as in "Maps - 300 DPI (Print)": what is left of such a folder decides whether it names anything. */
+const FORMAT_NOTE = /\([^)]*\)|\[[^\]]*\]|\b\d{2,4}\s*(?:dpi|ppi|pps|px)\b|\b(?:print|printable|vtt|hd|uhd|4k|8k|hi[\s-]?res|high[\s-]?res(?:olution)?|low[\s-]?res(?:olution)?|digital)\b/gi
 const NOT_A_NAME = /^(?:(?:19|20)\d\d|\d{2,4}\s*(?:ppi|dpi|pps|px)|\d{3,5}\s*x\s*\d{3,5}|\d+k|(?:with|no|without)?[\s_-]*grid(?:s|ded|less)?)$/i
 
 /** Folders like "01 Hunt for Haldraxis" sort a release; the number is not part of its name. */
-export const cleanFolder = (name: string) => name.replace(/^\d{1,3}(?:[\s._-]+|$)/, '').replace(/[_\s]+/g, ' ').trim()
+export const cleanFolder = (name: string) => name.replace(/^(?:\d{1,3}(?:\s*-\s+|[\s._]+|$)|\d{2,3}-(?=\S))/, '').replace(/[_\s]+/g, ' ').trim()
+
+/** A folder that only sorts or describes files, such as "Maps - 300 DPI (Print)" or "02 NO GRID". */
+function isStructure(name: string): boolean {
+  const bare = name.replace(FORMAT_NOTE, ' ').replace(/[\s\-–_.,]+/g, ' ').trim().toLowerCase()
+  return !bare || GENERIC.has(bare) || NOT_A_NAME.test(bare)
+}
 
 export interface FolderChain {
   /** Folders that name something, outermost first; structure such as "02 NO GRID" drops out. */
@@ -94,7 +155,7 @@ export function folderChain(segments: string[]): FolderChain {
     const name = cleanFolder(segment)
     const lower = name.toLowerCase()
     if (PLATFORMS.has(lower)) underPlatform = true
-    if (!name || GENERIC.has(lower) || NOT_A_NAME.test(name)) continue
+    if (!name || GENERIC.has(lower) || NOT_A_NAME.test(name) || isStructure(name)) continue
     if (names.at(-1)?.toLowerCase() !== lower) names.push(name)
   }
   return { names, underPlatform }
@@ -117,12 +178,19 @@ export function provenance(chain: FolderChain, shareMentioningFolder: number): {
   return !chain.underPlatform && shareMentioningFolder >= 1 / 3 ? { creator: '', pack: first } : { creator: first, pack: '' }
 }
 
-const SKIP_DIR = /^(?:tokens?|portraits?|music|audio|sounds?|pdfs?|handouts?|art|artwork|assets?|sprites?|icons?|__macosx)$/i
-const SKIP_FILE = /\b(?:stat[\s-]*blocks?|preview|thumb(?:nail)?s?|cover|promo|poster|banner|watermark(?:ed)?|logo|credits?)\b/i
+const SYSTEM_DIR = /^__macosx$/i
 
-/** Packs bundle tokens, covers and art with the maps; those never belong in the library. */
+/** Packs bundle tokens, covers and art with the maps; the scan rules keep those out of the library. */
 export function isLikelyMap(dirs: string[], stem: string): boolean {
-  return !dirs.some((d) => SKIP_DIR.test(d)) && !SKIP_FILE.test(stem.replace(/_/g, ' '))
+  if (dirs.some((d) => SYSTEM_DIR.test(d))) return false
+  const name = stem.replace(/_/g, ' ')
+  const skipped = dirs.some((d) => test(current.skipFolder, d.replace(/_/g, ' ').trim())) || test(current.skipFile, name)
+  return !skipped || dirs.some((d) => test(current.include, d.replace(/_/g, ' '))) || test(current.include, name)
+}
+
+/** Overlays are pieces laid over a map, such as an opened roof or a moved wall; they belong to its scene. */
+export function isOverlay(dirs: string[], stem: string): boolean {
+  return dirs.some((d) => test(current.overlays, d.replace(/_/g, ' '))) || test(current.overlays, stem.replace(/_/g, ' '))
 }
 
 const KEYWORDS: Record<string, string[]> = {
@@ -154,13 +222,17 @@ const WEATHERS: Record<string, string[]> = {
   Fire: ['fire', 'burning', 'burnt', 'lava', 'ember', 'inferno'],
 }
 
-const CONDITION_WORDS = new Set([...Object.values(TIMES).flat(), ...Object.values(WEATHERS).flat(), 'floor', 'level', 'lvl', 'storey', 'story', 'deck', 'clean', 'empty', 'furnished', 'unfurnished', 'labelled', 'labeled', 'unlabelled', 'unlabeled', 'keyed'])
+const CONDITION_WORDS = new Set([
+  ...Object.values(TIMES).flat(), ...Object.values(WEATHERS).flat(), 'floor', 'level', 'lvl', 'storey', 'story', 'deck',
+  'clean', 'empty', 'furnished', 'unfurnished', 'labelled', 'labeled', 'unlabelled', 'unlabeled', 'keyed',
+  'outside', 'outdoors', 'roofless', 'cutaway', 'open', 'closed',
+])
 
 /** Whether these words only describe a state of a map rather than a different place. */
 export function describesCondition(words: string[]): boolean {
   return words.every((w, i) => {
     const lower = w.toLowerCase()
-    return CONDITION_WORDS.has(lower) || levelOf([lower]) !== null || (/^\d+$/.test(lower) && levelOf(words.slice(i - 1, i + 1)) !== null)
+    return CONDITION_WORDS.has(lower) || current.variants.has(lower) || levelOf([lower]) !== null || (/^\d+$/.test(lower) && levelOf(words.slice(i - 1, i + 1)) !== null)
   })
 }
 

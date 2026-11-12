@@ -81,11 +81,13 @@ function signature(grey: Buffer, size: number): Int8Array {
   return Int8Array.from(edges, (e) => Math.round(((e - mean) / peak) * 127))
 }
 
-export async function analyzeImage(input: string, thumbs: { large: string; small: string }): Promise<Analysis> {
+/** Analyses a map, or returns null without decoding it when its header says it is smaller than `minSide`. */
+export async function analyzeImage(input: string, thumbs: { large: string; small: string }, minSide = 0): Promise<Analysis | null> {
   const open = () => sharp(input, { limitInputPixels: PIXEL_LIMIT })
   const meta = await open().metadata()
   const width = meta.width
   const height = meta.pageHeight ?? meta.height
+  if (Math.min(width, height) < minSide) return null
   const format = meta.format === 'jpeg' ? 'jpg' : meta.format === 'heif' ? 'avif' : meta.format
 
   // Everything visual comes from the large thumbnail so the source is decoded once.

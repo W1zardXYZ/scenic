@@ -44,9 +44,11 @@ const FORMATS = [['webp', 'WebP'], ['jpg', 'JPG'], ['png', 'PNG'], ['avif', 'AVI
 
 const bytes = (n: number) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${(n / 1e6).toFixed(1)} MB`)
 
-function versionLabel(m: MapRecord): string {
+/** Names a file among its versions; the resolution is added when the versions differ in it, as print and VTT exports do. */
+function versionLabel(m: MapRecord, versions: MapRecord[]): string {
   const kind = m.rel.toLowerCase().match(/\.(dd2vtt|df2vtt|uvtt)$/) ? 'VTT file' : m.format.toUpperCase()
-  return `${m.hasGrid ? 'Grid' : 'No grid'} · ${kind}`
+  const resolutions = new Set(versions.map((v) => Math.round(v.ppsX)))
+  return [m.hasGrid ? 'Grid' : 'No grid', kind, resolutions.size > 1 && `${Math.round(m.ppsX)} ppi`].filter(Boolean).join(' · ')
 }
 
 function Stat({ label, children }: { label: string; children: React.ReactNode }) {
@@ -67,6 +69,12 @@ function Spec({ label, children }: { label: string; children: React.ReactNode })
   )
 }
 
+function byVariant(maps: MapRecord[]): [string, MapRecord[]][] {
+  const buckets = new Map<string, MapRecord[]>()
+  for (const m of maps) buckets.set(m.variant, [...(buckets.get(m.variant) ?? []), m])
+  return [...buckets.entries()]
+}
+
 export function MapView({ map, library, index, prefs, backHash, onChanged }: {
   map: MapRecord
   library: Library
@@ -77,11 +85,10 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
 }) {
   const group = library.groups.find((g) => g.id === map.groupId)!
   const maps = useMemo(() => group.mapIds.map((id) => index.byId.get(id)!).filter(Boolean), [group, index])
-  const variants = useMemo(() => {
-    const buckets = new Map<string, MapRecord[]>()
-    for (const m of maps) buckets.set(m.variant, [...(buckets.get(m.variant) ?? []), m])
-    return [...buckets.entries()]
-  }, [maps])
+  const variants = useMemo(() => byVariant(maps), [maps])
+  // Overlays at several resolutions share a label, so each shows once, like a variant's versions.
+  const overlays = useMemo(() => byVariant(group.overlayIds.map((id) => index.byId.get(id)!).filter(Boolean)), [group, index])
+  const isOverlay = map.variantKind === 'overlay'
   // Each kind keeps the server's order, which is bottom to top for levels.
   const sections = useMemo(() => KINDS.map(({ label, kinds }) => ({
     label,
@@ -106,7 +113,7 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
   /** A variant's thumbnail; in the matrix the row and column headings name it, so `label` is only for screen readers. */
   const thumbLink = ([name, list]: [string, MapRecord[]], label?: string) => {
     const best = bestVersion(list)
-    const on = name === map.variant
+    const on = name === map.variant && (list[0].variantKind === 'overlay') === isOverlay
     return (
       <a
         key={name}
@@ -177,7 +184,7 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
 
   const facts = index.facts.get(map.id)!
   const spec = pageSpec(prefs)
-  const versions = variants.find(([v]) => v === map.variant)?.[1] ?? [map]
+  const versions = (isOverlay ? overlays : variants).find(([v]) => v === map.variant)?.[1] ?? [map]
   const widthCm = (facts.cols * spec.squareMm) / 10
   const heightCm = (facts.rows * spec.squareMm) / 10
   const exportUrl = `/api/maps/${map.id}/export?format=${format}&quality=${quality}&pps=${pps}`
@@ -230,7 +237,7 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
               </DialogContent>
             </Dialog>
           )}
-          {variants.length > 1 && (
+          {(variants.length > 1 || overlays.length > 0) && (
             <nav aria-label="Variants" className="flex [justify-content:safe_center] gap-6 overflow-x-auto px-3 pt-1 pb-3 [scrollbar-width:none] lg:px-8 lg:pb-6">
               {matrix ? (
                 <table className="shrink-0 border-separate border-spacing-x-2 border-spacing-y-1 text-xs text-muted-foreground">
@@ -261,6 +268,12 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
                   </div>
                 </section>
               ))}
+              {overlays.length > 0 && (
+                <section aria-label="Overlays" className="flex shrink-0 flex-col gap-2">
+                  <h2 className="text-xs text-muted-foreground">Overlays</h2>
+                  <div className="flex gap-2">{overlays.map((overlay) => thumbLink(overlay))}</div>
+                </section>
+              )}
             </nav>
           )}
         </div>
@@ -304,7 +317,7 @@ export function MapView({ map, library, index, prefs, backHash, onChanged }: {
               }}
               className="-ml-2.5 flex-wrap"
             >
-              {versions.map((v) => <ToggleGroupItem key={v.id} value={String(v.id)}>{versionLabel(v)}</ToggleGroupItem>)}
+              {versions.map((v) => <ToggleGroupItem key={v.id} value={String(v.id)}>{versionLabel(v, versions)}</ToggleGroupItem>)}
             </ToggleGroup>
           )}
 

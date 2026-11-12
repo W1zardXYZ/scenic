@@ -184,3 +184,20 @@ test('stat blocks are not maps', () => {
 test('interior and exterior are two views of one place', () => {
   assert.equal(describesCondition(['Night', 'Interior']), true)
 })
+
+test('resolution and format folders are structure, not projects', () => {
+  assert.deepEqual(folderChain(['2-MinuteTableTop', 'Mecha Ruins', 'Maps - 300 DPI (Print)']).names, ['2-MinuteTableTop', 'Mecha Ruins'])
+  assert.deepEqual(folderChain(['Mecha Ruins', 'Overlays - 72 DPI (VTT)']).names, ['Mecha Ruins'])
+  assert.deepEqual(folderChain(['Other', 'Creator', 'Pack (Forest)']).names, ['Creator', 'Pack (Forest)'])
+  assert.equal(cleanFolder('2-MinuteTableTop'), '2-MinuteTableTop')
+  assert.equal(cleanFolder('02-Tavern'), 'Tavern')
+  assert.equal(cleanFolder('03 - Tavern'), 'Tavern')
+})
+
+test('overlay folders and names', async () => {
+  const { isOverlay, statedSize } = await import('./names.ts')
+  assert.equal(isOverlay(['Mecha Ruins', 'Maps - 300 DPI (Print)', 'Overlays - 300 DPI (Print)'], 'Mecha Ruins - Day - Open Head - 5x4'), true)
+  assert.equal(isOverlay(['Pack'], 'Tavern Roof Overlay'), true)
+  assert.equal(isOverlay(['Pack'], 'Tavern Roof'), false)
+  assert.deepEqual(statedSize('Mecha Ruins - Open Right Arm - 3x2'), { cols: 3, rows: 2 })
+})
