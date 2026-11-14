@@ -13,7 +13,7 @@ import {
   touches,
 } from '../shared/fog.ts'
 import type { GridType } from '../shared/types.ts'
-import { type Filter, filterPixels, FUZZINESS, HUES, isPlain, MAX_BANDS, MAX_CURVE_POINTS, MAX_SAMPLES, MAX_SELECTIONS } from '../shared/tone.ts'
+import { type Filter, filterPixels, invalidFilter, isPlain } from '../shared/tone.ts'
 import { PIXEL_LIMIT } from './analyze.ts'
 import type { FileRow } from './db.ts'
 import { safeName } from './export.ts'
@@ -57,14 +57,6 @@ const isFogItem = (item: FogItem) => typeof item?.name === 'string' && item.name
   ['cover', 'show'].includes(item.mode) && Array.isArray(item.parts) && item.parts.length >= 1 && item.parts.length <= 100 &&
   item.parts.every((part) => typeof part?.subtract === 'boolean' && (part.box ? isRect(part.box) : isCurve(part.points)))
 
-const isToneCurve = (curve: Filter['curve']) => Array.isArray(curve) && curve.length >= 2 && curve.length <= MAX_CURVE_POINTS &&
-  curve.every((p, i) => Array.isArray(p) && p.length === 2 && finite(p[0], 0, 255) && finite(p[1], 0, 255) && (i === 0 || p[0] > curve[i - 1][0]))
-const isBand = (b: Filter['bands'][number]) => [b?.from, b?.to, b?.soft].every((v) => finite(v, 0, 255)) && b.from <= b.to && finite(b.amount, -1, 1)
-
-const isSelection = (s: Filter['selections'][number]) => Array.isArray(s?.samples) && s.samples.length <= MAX_SAMPLES &&
-  s.samples.every((x) => typeof x?.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) && typeof x.subtract === 'boolean') &&
-  finite(s.fuzziness, FUZZINESS.min, FUZZINESS.max) && isToneCurve(s.curve) && finite(s.amount, -1, 1)
-
 const MAX_FOG_CARDS = 1000
 
 /**
@@ -93,13 +85,8 @@ export function validatePrint(q: PrintRequest): string | null {
   if (!q.overlay || !/^#[0-9a-f]{6}$/i.test(q.overlay.color) || !finite(q.overlay.opacity, 0, 1) || !finite(q.overlay.widthMm, 0, 10)) return 'overlay'
   if (!Array.isArray(q.pages) || !q.pages.length || q.pages.length > 2000) return 'pages'
   if (!q.pages.every((p) => isRect(p) && finite(p.sheetW, 10, 2000) && finite(p.sheetH, 10, 2000) && typeof p.label === 'string' && p.label.length <= 16)) return 'pages'
-  if (!q.filter || !['color', 'grey', 'light', 'threshold'].includes(q.filter.mode) || !finite(q.filter.amount, 0, 1)) return 'filter'
-  const { black, white, gamma } = q.filter.levels ?? {}
-  if (!finite(black, 0, 254) || !finite(white, 1, 255) || black >= white || !finite(gamma, 0.1, 10)) return 'levels'
-  if (!isToneCurve(q.filter.curve)) return 'curve'
-  if (!Array.isArray(q.filter.bands) || q.filter.bands.length > MAX_BANDS || !q.filter.bands.every(isBand)) return 'bands'
-  if (!Array.isArray(q.filter.hues) || q.filter.hues.length !== HUES.length || !q.filter.hues.every((h) => finite(h, -1, 1))) return 'hues'
-  if (!Array.isArray(q.filter.selections) || q.filter.selections.length > MAX_SELECTIONS || !q.filter.selections.every(isSelection)) return 'selections'
+  const badFilter = invalidFilter(q.filter)
+  if (badFilter) return badFilter
   if (!q.marks) return 'marks'
   if (!q.fog || !Array.isArray(q.fog.items) || q.fog.items.length > 100 || !q.fog.items.every(isFogItem) || !/^#[0-9a-f]{6}$/i.test(q.fog.fill) ||
     !['undefined', 'boolean'].includes(typeof q.fog.names) || (q.fog.paper !== undefined && !PAPERS.some((p) => p.id === q.fog.paper))) return 'fog'

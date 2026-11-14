@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  BAND_PRESETS, bandFunction, curveFunction, type Filter, filterPixels, greyOf, hexToRgb, isPlain, NEUTRAL_LEVELS, NEW_FILTER, NEW_SELECTION, oklab,
+  BAND_PRESETS, bandFunction, curveFunction, type Filter, filterPixels, greyOf, hexToRgb, invalidFilter, isPlain, NEUTRAL_LEVELS, NEW_FILTER, NEW_SELECTION, oklab,
   printTable, rgbToHex, selectionWeigher, selectionWeights, shiftHues, toneCurve,
 } from './tone.ts'
 
@@ -162,4 +162,16 @@ test('the same colour gets the same weight wherever it is', () => {
   const [w] = selectionWeights(pixels, 4, [{ ...NEW_SELECTION, samples: [pick('#4c5449')] }])
   assert.equal(w[0], w[2])
   assert.equal(w[1], 0)
+})
+
+test('a filter from outside is checked part by part', () => {
+  assert.equal(invalidFilter(NEW_FILTER), null)
+  assert.equal(invalidFilter(undefined), 'filter')
+  assert.equal(invalidFilter({ ...NEW_FILTER, mode: 'sepia' as never }), 'filter')
+  assert.equal(invalidFilter({ ...NEW_FILTER, levels: { black: 100, white: 100, gamma: 1 } }), 'levels')
+  assert.equal(invalidFilter({ ...NEW_FILTER, curve: [[0, 0], [0, 255]] }), 'curve')
+  assert.equal(invalidFilter({ ...NEW_FILTER, bands: [{ from: 200, to: 100, soft: 10, amount: 0 }] }), 'bands')
+  assert.equal(invalidFilter({ ...NEW_FILTER, hues: [0, 0] }), 'hues')
+  assert.equal(invalidFilter({ ...NEW_FILTER, selections: [{ ...NEW_SELECTION, samples: [{ color: 'red', subtract: false }] }] }), 'selections')
+  assert.equal(invalidFilter({ ...NEW_FILTER, selections: [{ ...NEW_SELECTION, samples: [{ color: '#a0b0c0', subtract: false }] }] }), null)
 })

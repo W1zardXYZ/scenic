@@ -7,6 +7,7 @@ import {
 import { type FogItem, type FogPart, type FogShape, fogPlan, NEW_FOG, scaleFog } from '../shared/fog.ts'
 import type { Library, MapRecord } from '../shared/types.ts'
 import { MAX_SAMPLES, MAX_SELECTIONS, NEW_FILTER, NEW_SELECTION } from '../shared/tone.ts'
+import type { Look } from '../shared/look.ts'
 import { AppBar } from '@/components/app-bar'
 import { GradeBadge, Hint, IconButton, Segmented } from '@/components/controls'
 import { Trail } from '@/components/trail'
@@ -19,11 +20,17 @@ import { useHistory } from '@/hooks/use-history'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { announce } from './announce.ts'
-import { api, createPrint, type PrintFile } from './api.ts'
+import { api, createPrint, type PrintFile, type SavedCopy, type SavedLook } from './api.ts'
 import { type Index, grade, pageSpec, type Prefs } from './filters.ts'
 import { sceneScope } from './scope.ts'
 import { Canvas } from './studio/Canvas.tsx'
 import { Settings } from './studio/Settings.tsx'
+import { setSectionOpen } from './studio/sections.ts'
+import {
+  DEFAULT_MARKS, DEFAULT_OUTPUT, defaultOverlay, lookOf, measuredGrid, type Output, paperOf, readSnapshot, type Snapshot,
+} from './studio/snapshot.ts'
+import { useLooks } from './studio/use-looks.ts'
+import { useSaves } from './studio/use-saves.ts'
 import type { Filter, Fog, FogCombine, FogDraw, Grid, LabeledPage, Marks, Overlay, PickHow, Tool } from './studio/types.ts'
 
 const IN = 25.4
@@ -32,45 +39,104 @@ const QUALITIES = [['high', 'Best quality'], ['balanced', 'Balanced'], ['small',
 
 const PART_LABELS: Record<PrintFile['part'], string> = { overview: 'Overview', sheets: 'Map sheets', fog: 'Fog cards', all: 'PNG sheets' }
 
-export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }: {
+/** How long after the last change the working settings are sent to the server. */
+const AUTOSAVE_MS = 800
+
+interface StudioProps {
   map: MapRecord
   library: Library
   index: Index
   prefs: Prefs
   setPrefs: (patch: Partial<Prefs>) => void
   onChanged: () => void
-}) {
+}
+
+interface Stored {
+  saves: SavedCopy[]
+  looks: { looks: SavedLook[]; defaultId: number | null }
+  /** Where the studio starts: the map's working settings, or the default look on a map not opened before. */
+  initial: Snapshot
+  /** What anything missing from a saved copy falls back to. */
+  defaults: Snapshot
+}
+
+/** Loads what was kept for the map before the studio opens, so it starts where it was left rather than jumping. */
+export function PrintStudio(props: StudioProps) {
+  const { map, prefs, setPrefs } = props
+  const [stored, setStored] = useState<Stored | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let stopped = false
+    setFailed(false)
+    Promise.all([api.printState(map.id), api.looks()]).then(([state, looks]) => {
+      if (stopped) return
+      const defaults: Snapshot = {
+        grid: measuredGrid(map), overlay: defaultOverlay(map), filter: NEW_FILTER, marks: DEFAULT_MARKS, fadeMm: 0, fogShare: NEW_FOG,
+        cropShare: null, manual: null, output: DEFAULT_OUTPUT, paper: paperOf(prefs), lookId: null,
+      }
+      const start = looks.looks.find((l) => l.id === looks.defaultId)
+      const initial = state.working ? readSnapshot(state.working, defaults)
+        : start ? { ...defaults, filter: start.look.filter, fadeMm: start.look.fadeMm, lookId: start.id } : defaults
+      // The paper settings are shared by every map, so a map opens with its own.
+      setPrefs(initial.paper)
+      setStored({ saves: state.saves, looks, initial, defaults })
+    }, () => !stopped && setFailed(true))
+    return () => {
+      stopped = true
+    }
+  }, [map.id, attempt])
+  if (stored) return <Studio {...props} stored={stored} />
+  return (
+    <div className="fixed inset-0 flex flex-col items-center justify-center gap-3 bg-canvas">
+      {failed ? (
+        <>
+          <p>The saved settings could not be loaded.</p>
+          <div className="flex gap-2">
+            <Button variant="ghost" asChild><a href={`#/map/${map.id}`}>Back</a></Button>
+            <Button onClick={() => setAttempt(attempt + 1)}>Try again</Button>
+          </div>
+        </>
+      ) : <Spinner aria-label="Loading" />}
+    </div>
+  )
+}
+
+function Studio({ map, library, index, prefs, setPrefs, onChanged, stored }: StudioProps & { stored: Stored }) {
+  const { initial, defaults } = stored
   const group = library.groups.find((g) => g.id === map.groupId)!
   const siblings = useMemo(() => group.mapIds.map((id) => index.byId.get(id)!).filter(Boolean), [group, index])
 
   const measured: Grid = useMemo(() => ({
     type: map.gridType, cols: map.width / map.ppsX, rows: map.height / map.ppsY, offsetX: map.offsetX, offsetY: map.offsetY,
   }), [map])
-  const [grid, setGrid] = useState<Grid>(measured)
+  const [grid, setGrid] = useState<Grid>(initial.grid)
   const [lockAspect, setLockAspect] = useState(true)
-  const [overlay, setOverlay] = useState<Overlay>({ show: !map.hasGrid, color: '#000000', opacity: 0.35, widthMm: 0.2, numbering: false })
-  const [filter, setFilter] = useState<Filter>(NEW_FILTER)
+  const [overlay, setOverlay] = useState<Overlay>(initial.overlay)
+  const [filter, setFilter] = useState<Filter>(initial.filter)
+  const [lookId, setLookId] = useState(initial.lookId)
   // Which colour selection the picker and the settings work on, and whether its mask shows.
   const [activeSelection, setActiveSelection] = useState(0)
   const [showMask, setShowMask] = useState(false)
-  const [marks, setMarks] = useState<Marks>({ cut: true, labels: true, overview: true })
-  const [fadeMm, setFadeMm] = useState(0)
+  const [marks, setMarks] = useState<Marks>(initial.marks)
+  const [fadeMm, setFadeMm] = useState(initial.fadeMm)
   // Kept as a share of the map, so fog stays on the same spot when the scale changes.
-  const [fogShare, setFogShare] = useState<Fog>(NEW_FOG)
+  const [fogShare, setFogShare] = useState<Fog>(initial.fogShare)
   // Newest last: that one is what gets edited, and what new parts join.
   const [selectedFog, setSelectedFog] = useState<number[]>([])
   const [fogDraw, setFogDraw] = useState<FogDraw>('box')
   const [fogCombine, setFogCombine] = useState<FogCombine>('new')
   const [fogSnap, setFogSnap] = useState(true)
-  const [output, setOutput] = useState<{ format: 'pdf' | 'png'; quality: 'high' | 'balanced' | 'small' }>({ format: 'pdf', quality: 'high' })
-  const [manual, setManual] = useState<LabeledPage[] | null>(null)
+  const [output, setOutput] = useState<Output>(initial.output)
+  const [manual, setManual] = useState<LabeledPage[] | null>(initial.manual)
   const [selected, setSelected] = useState<ReadonlySet<number>>(() => new Set())
   // Temporary, and kept as a share of the map so it stays on the same area when the scale changes.
-  const [cropShare, setCropShare] = useState<Rect | null>(null)
+  const [cropShare, setCropShare] = useState<Rect | null>(initial.cropShare)
   const [tool, setTool] = useState<Tool>('select')
   const [job, setJob] = useState<{ done: number; total: number } | null>(null)
   const [result, setResult] = useState<{ files: PrintFile[]; key: string } | null>(null)
   const [saved, setSaved] = useState(false)
+  const [createAfterLoad, setCreateAfterLoad] = useState(false)
   const [tab, setTab] = useState('scale')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const wide = useMediaQuery('(min-width: 64rem)')
@@ -211,11 +277,68 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     restore,
   )
 
+  // A tool's controls are in a section, which may be closed.
   useEffect(() => {
-    if (tool === 'fog') setTab('extras')
-    if (tool === 'crop') setTab('paper')
-    if (tool === 'pick') setTab('look')
+    const show = (tab: string, section: string) => {
+      setTab(tab)
+      setSectionOpen(section, true)
+    }
+    if (tool === 'fog') show('extras', 'extras.fog')
+    if (tool === 'crop') show('paper', 'paper.area')
+    if (tool === 'pick') show('look', 'look.selections')
   }, [tool])
+
+  const resetGrid = useCallback(() => {
+    setSaved(false)
+    setManual(null)
+    setGrid(measured)
+  }, [measured])
+
+  // What is kept for the map: its settings as they are, sent a moment after the last change.
+  const snapshot = useMemo((): Snapshot => ({
+    grid, overlay, filter, marks, fadeMm, fogShare, cropShare, manual, output,
+    paper: { squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered },
+    lookId,
+  }), [grid, overlay, filter, marks, fadeMm, fogShare, cropShare, manual, output, squareMm, paperId, orientation, marginMm, overlapMm, seamsOnGrid, centered, lookId])
+  const snapshotJson = useMemo(() => JSON.stringify(snapshot), [snapshot])
+  const sent = useRef(JSON.stringify(initial))
+  const latest = useRef({ snapshot, json: snapshotJson })
+  latest.current = { snapshot, json: snapshotJson }
+  useEffect(() => {
+    if (snapshotJson === sent.current) return
+    const timer = setTimeout(() => {
+      sent.current = snapshotJson
+      api.savePrintState(map.id, snapshot).catch(() => {
+        sent.current = ''
+        toast.error('Your settings could not be kept. They will be tried again after the next change', { id: 'autosave' })
+      })
+    }, AUTOSAVE_MS)
+    return () => clearTimeout(timer)
+  }, [snapshotJson, snapshot, map.id])
+  // Leaving within the delay must not lose the last changes.
+  useEffect(() => () => {
+    const { snapshot, json } = latest.current
+    if (json !== sent.current) api.savePrintState(map.id, snapshot, '', true).catch(() => {})
+  }, [map.id])
+
+  const adoptLook = useCallback((look: Look, id: number | null) => {
+    setFilter(look.filter)
+    setFadeMm(look.fadeMm)
+    setLookId(id)
+    setActiveSelection(0)
+    setShowMask(false)
+  }, [])
+  const current = useMemo(() => lookOf({ filter, fadeMm }), [filter, fadeMm])
+  const looks = useLooks(stored.looks, current, lookId, adoptLook)
+  const loadSnapshot = useCallback((s: Snapshot, create: boolean) => {
+    restore({ grid: s.grid, overlay: s.overlay, filter: s.filter, marks: s.marks, fadeMm: s.fadeMm, fogShare: s.fogShare, manual: s.manual, cropShare: s.cropShare, ...s.paper })
+    setOutput(s.output)
+    setLookId(s.lookId)
+    setActiveSelection(0)
+    setSelectedFog([])
+    setCreateAfterLoad(create)
+  }, [restore])
+  const saves = useSaves(map.id, stored.saves, snapshot, defaults, loadSnapshot)
 
   /** A plain pick starts the selection over, Shift adds to it, Alt takes the colour out; with none yet, it makes one. */
   const pickColour = useCallback((color: string, how: PickHow) => {
@@ -271,6 +394,13 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
     }
     setJob(null)
   }
+
+  // A saved copy opened to be exported: once its settings are in place, make the files (which are kept, so repeats are quick).
+  useEffect(() => {
+    if (!createAfterLoad) return
+    setCreateAfterLoad(false)
+    if (!ready) void create()
+  }, [createAfterLoad])
 
   // Create is replaced by its result, so focus moves on with it.
   useEffect(() => {
@@ -341,6 +471,9 @@ export function PrintStudio({ map, library, index, prefs, setPrefs, onChanged }:
       setActiveSelection={setActiveSelection}
       showMask={showMask}
       setShowMask={setShowMask}
+      resetGrid={resetGrid}
+      looks={looks}
+      saves={saves}
     />
   )
 
