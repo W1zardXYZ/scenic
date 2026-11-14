@@ -7,6 +7,7 @@ import { projectKey } from '../shared/types.ts'
 import type { GridType, MapEdit, Root, ScanStatus } from '../shared/types.ts'
 import { analyzeImage } from './analyze.ts'
 import { DATA_DIR, RESCAN_MS, WORKERS } from './config.ts'
+import { movePrintState } from './saved.ts'
 import { db, editKey, type FileRow, getFile, markChanged, deleteProfile, moveEdit, moveProfile, readEditLooks, readEdits, readProfiles, readSetting, transaction, writeEdit, writeSetting } from './db.ts'
 import { attachOverlays, differingBits, groupMaps, guessSquares, type GroupInput, type Measured, propagateGrid, signBits, similarity } from './group.ts'
 import { classify, folderChain, type ParsedName, isLikelyMap, isOverlay, mentions, parseName, provenance, statedSize, useRules } from './names.ts'
@@ -364,6 +365,7 @@ function followRenames(rows: FileRow[]): void {
     })
     if (match < 0) continue
     moveEdit(edit.key, open[match].key)
+    movePrintState(edit.key, open[match].key)
     open.splice(match, 1)
   }
 }

@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { ArrowDown, ArrowUp, ChevronRight, Pipette, Plus, RotateCcw, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Pipette, Plus, RotateCcw, X } from 'lucide-react'
 import {
   type Band, BAND_PRESETS, CURVE_PRESETS, curveFunction, curveInputs, FUZZINESS, greyOf, HUES, isStraight, MAX_BANDS, MAX_CURVE_POINTS, MAX_SAMPLES,
-  MAX_SELECTIONS, NEW_SELECTION, NO_HUES, type Selection, selectionWeights, STRAIGHT,
+  MAX_SELECTIONS, NEW_SELECTION, type Selection, selectionWeights, STRAIGHT,
 } from '../../shared/tone.ts'
 import { ColorWell, IconButton, NumberField, Segmented, SliderField, SwitchRow } from '@/components/controls'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { Histogram, useHistogram } from './histogram.tsx'
@@ -41,13 +40,15 @@ function addPoint(curve: Point[], x: number, y: number): { curve: Point[]; index
 const pointName = (i: number, count: number) => (i === 0 ? 'Dark end' : i === count - 1 ? 'Light end' : `Point ${i}`)
 
 /** A brightness curve over the histogram of the tones it acts on. */
-function CurveEditor({ label, value, onChange, bins, presets = true }: {
+function CurveEditor({ label, value, onChange, bins, presets = true, titled = true }: {
   label: string
   value: Point[]
   onChange: (curve: Point[]) => void
   /** Counts of the tones that reach the curve; null while they load. */
   bins: ArrayLike<number> | null
   presets?: boolean
+  /** Off when a section's header already names it. */
+  titled?: boolean
 }) {
   const [curve, commit] = useDraft(value, onChange)
   // Pointer events can arrive before the next render; they work on the newest curve.
@@ -137,10 +138,10 @@ function CurveEditor({ label, value, onChange, bins, presets = true }: {
   return (
     <div className="flex flex-col gap-3" role="group" aria-label={label}>
       <div className="flex items-center justify-between gap-3">
-        <span className={LABEL}>{label}</span>
+        {titled ? <span className={LABEL}>{label}</span> : <span />}
         <div className="-my-2 flex">
           <IconButton label={`Add a point to the ${label.toLowerCase()}`} icon={Plus} disabled={curve.length >= MAX_CURVE_POINTS} onClick={addInGap} />
-          <IconButton label={`Reset the ${label.toLowerCase()}`} icon={RotateCcw} disabled={curve.length === 2 && isStraight(curve)} onClick={() => { apply(STRAIGHT); setActive(0) }} />
+          {titled && <IconButton label={`Reset the ${label.toLowerCase()}`} icon={RotateCcw} disabled={curve.length === 2 && isStraight(curve)} onClick={() => { apply(STRAIGHT); setActive(0) }} />}
         </div>
       </div>
 
@@ -260,7 +261,7 @@ function BandFields({ band, index, change, remove }: { band: Band; index: number
   )
 }
 
-function BandsControl({ filter, setFilter }: { filter: Filter; setFilter: SetFilter }) {
+export function BandsControl({ filter, setFilter }: { filter: Filter; setFilter: SetFilter }) {
   const box = useRef<HTMLDivElement>(null)
   const setBands = (bands: Band[]) => setFilter((f) => ({ ...f, bands }))
   const add = () => {
@@ -270,13 +271,12 @@ function BandsControl({ filter, setFilter }: { filter: Filter; setFilter: SetFil
   }
   return (
     <div ref={box} className="flex flex-col gap-4" role="group" aria-label="Tone ranges">
-      <div className="flex items-center justify-between gap-3">
-        <span className={LABEL}>Tone ranges</span>
-        <IconButton label="Add a tone range" icon={Plus} disabled={filter.bands.length >= MAX_BANDS} onClick={add} className="-my-2" />
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          Moves one part of the range up or down while the rest stays. Tones inside keep their contrast; the soft edges take up the change, so a darker tone never prints lighter than a brighter one.
+        </p>
+        <IconButton label="Add a tone range" icon={Plus} disabled={filter.bands.length >= MAX_BANDS} onClick={add} className="-mt-2 shrink-0" />
       </div>
-      <p className="text-xs text-muted-foreground">
-        Moves one part of the range up or down while the rest stays. Tones inside keep their contrast; the soft edges take up the change, so a darker tone never prints lighter than a brighter one.
-      </p>
       {filter.bands.map((band, i) => (
         <BandFields
           key={i}
@@ -295,44 +295,32 @@ function BandsControl({ filter, setFilter }: { filter: Filter; setFilter: SetFil
 
 const SWATCHES = ['#e5484d', '#e5c33d', '#46a758', '#3eb6c4', '#3e63dd', '#c34fbf']
 
-function HuesControl({ filter, setFilter }: { filter: Filter; setFilter: SetFilter }) {
-  const changed = filter.hues.filter((h) => h !== 0).length
+export function HuesControl({ filter, setFilter }: { filter: Filter; setFilter: SetFilter }) {
   return (
-    <Collapsible className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <CollapsibleTrigger asChild>
-          <Button variant="ghost" size="sm" className="group/hues -ml-2.5 text-muted-foreground">
-            <ChevronRight data-icon="inline-start" className="transition-transform group-data-[state=open]/hues:rotate-90" />
-            Colour ranges{changed ? ` (${changed})` : ''}
-          </Button>
-        </CollapsibleTrigger>
-        <IconButton label="Reset colour ranges" icon={RotateCcw} disabled={!changed} onClick={() => setFilter((f) => ({ ...f, hues: NO_HUES }))} className="-my-2" />
-      </div>
-      <CollapsibleContent className="flex flex-col gap-4 pt-1">
-        <p className="text-xs text-muted-foreground">Lighten or darken one family of colours. Greys stay as they are; in the grey modes this changes how light each colour turns.</p>
-        {HUES.map((name, i) => (
-          <div key={name} className="flex items-end gap-3">
-            <span aria-hidden="true" className="mb-0.5 size-3 shrink-0 rounded-full" style={{ backgroundColor: SWATCHES[i] }} />
-            <div className="flex-1">
-              <SliderField
-                label={name}
-                value={filter.hues[i]}
-                display={amountText(filter.hues[i])}
-                min={-1}
-                max={1}
-                step={0.05}
-                onChange={(v) => setFilter((f) => ({ ...f, hues: f.hues.map((h, j) => (j === i ? v : h)) }))}
-              />
-            </div>
+    <div className="flex flex-col gap-4">
+      <p className="text-xs text-muted-foreground">Lighten or darken one family of colours. Greys stay as they are; in the grey modes this changes how light each colour turns.</p>
+      {HUES.map((name, i) => (
+        <div key={name} className="flex items-end gap-3">
+          <span aria-hidden="true" className="mb-0.5 size-3 shrink-0 rounded-full" style={{ backgroundColor: SWATCHES[i] }} />
+          <div className="flex-1">
+            <SliderField
+              label={name}
+              value={filter.hues[i]}
+              display={amountText(filter.hues[i])}
+              min={-1}
+              max={1}
+              step={0.05}
+              onChange={(v) => setFilter((f) => ({ ...f, hues: f.hues.map((h, j) => (j === i ? v : h)) }))}
+            />
           </div>
-        ))}
-      </CollapsibleContent>
-    </Collapsible>
+        </div>
+      ))}
+    </div>
   )
 }
 
-/** Curve, tone ranges and colour ranges: the Photoshop-style controls next to the ink settings. */
-export function ToneControl({ src, filter, setFilter }: { src: string; filter: Filter; setFilter: SetFilter }) {
+/** The tone curve, over the histogram of the tones that reach it. */
+export function CurveControl({ src, filter, setFilter }: { src: string; filter: Filter; setFilter: SetFilter }) {
   const bins = useHistogram(src)
   // The tones that reach the curve, after levels and ranges, so the points line up with what they change.
   const inputs = useMemo(() => {
@@ -345,13 +333,7 @@ export function ToneControl({ src, filter, setFilter }: { src: string; filter: F
     return counts
   }, [bins, filter])
   const setCurve = useCallback((curve: Point[]) => setFilter((f) => ({ ...f, curve })), [setFilter])
-  return (
-    <>
-      <CurveEditor label="Curve" value={filter.curve} onChange={setCurve} bins={inputs} />
-      <BandsControl filter={filter} setFilter={setFilter} />
-      <HuesControl filter={filter} setFilter={setFilter} />
-    </>
-  )
+  return <CurveEditor label="Curve" value={filter.curve} onChange={setCurve} bins={inputs} titled={false} />
 }
 
 /** Every so many pixels is plenty for a histogram. */

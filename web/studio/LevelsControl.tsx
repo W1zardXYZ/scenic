@@ -1,7 +1,6 @@
-import { RotateCcw } from 'lucide-react'
 import { Slider as SliderPrimitive } from 'radix-ui'
-import { isNeutral, type Levels, NEUTRAL_LEVELS, printTable } from '../../shared/tone.ts'
-import { IconButton, NumberField } from '@/components/controls'
+import { type Levels, printTable } from '../../shared/tone.ts'
+import { NumberField } from '@/components/controls'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { Histogram, useHistogram } from './histogram.tsx'
@@ -42,11 +41,6 @@ export function LevelsControl({ src, filter, setFilter }: {
 
   return (
     <div className="flex flex-col gap-3" role="group" aria-label="Levels">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-xs text-muted-foreground">Levels</span>
-        <IconButton label="Reset levels" icon={RotateCcw} disabled={isNeutral(levels)} onClick={() => apply(NEUTRAL_LEVELS)} className="-my-2" />
-      </div>
-
       {/* Inset by half a handle, so a handle's centre lines up with its histogram value. */}
       <div className="px-1.5">
         <div className="relative h-20 overflow-hidden rounded-sm bg-input">

@@ -6,22 +6,24 @@ import { Readable } from 'node:stream'
 import sharp from 'sharp'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { basicAuth } from 'hono/basic-auth'
 import { bodyLimit } from 'hono/body-limit'
 import { compress } from 'hono/compress'
 import { HTTPException } from 'hono/http-exception'
 import { PIXEL_LIMIT } from './analyze.ts'
 import { BROWSE_ROOT, DATA_DIR, PASSWORD, PORT } from './config.ts'
+import type { Look } from '../shared/look.ts'
 import { isWithin } from '../shared/tree.ts'
 import { projectKey } from '../shared/types.ts'
 import type { GridType, MapEdit } from '../shared/types.ts'
-import { db, getFile, hideScene, libraryVersion, markChanged, type ProfileKind, readLibrary, writeEdit, writeProfile } from './db.ts'
+import { db, editKey, getFile, hideScene, libraryVersion, markChanged, type ProfileKind, readLibrary, writeEdit, writeProfile } from './db.ts'
 import { exportMap, exportName, exportZip, type ExportFormat, FORMATS, safeName } from './export.ts'
 import { generate, type PrintPart, type PrintRequest, validatePrint } from './print.ts'
 import { applyEdit, dissolveNode, failedFiles, flattenSingles, moveInto, moveNode, readRules, regroup, saveRules, type TreeNode, saveGrid, scanStatus, startSchedule, startScan, thumbPath } from './scan.ts'
 import { aiSettings, aiStatus, clearSuggestions, listModels, type AiPatch, saveAiSettings, sceneSuggestions, startAi, stopAi } from './ai.ts'
 import { MAX_RULE_LENGTH, MAX_RULE_WORDS, normaliseRules, RULE_LISTS } from '../shared/rules.ts'
+import { createLook, deleteLook, deletePrintCopy, invalidSettings, readLooks, readPrintState, updateLook, writePrintState } from './saved.ts'
 import { cached, cachePath, clearPartialFiles, localImage } from './source.ts'
 
 const GRID_TYPES: GridType[] = ['square', 'hex', 'hexPointy']
@@ -333,6 +335,54 @@ app.get('/api/export-zip', (c) => {
   c.header('content-disposition', attachment(`${safeName(c.req.query('name') || 'Scenic export')}.zip`))
   c.header('content-type', 'application/zip')
   return c.body(toWeb(exportZip(files, options)))
+})
+
+/** What the print studio keeps for a map: its working settings and the copies saved by name. */
+app.get('/api/maps/:id/print', (c) => {
+  const file = mapFile(c.req.param('id'))
+  return file ? c.json(readPrintState(editKey(file))) : c.notFound()
+})
+
+/** `name` '' (the route without one) is the working settings, which the studio updates as you go. */
+const putPrintState = async (c: Context) => {
+  const file = mapFile(c.req.param('id') ?? '')
+  if (!file) return c.notFound()
+  const name = (c.req.param('name') ?? '').trim()
+  const { settings } = await c.req.json<{ settings: unknown }>()
+  const bad = invalidSettings(settings)
+  if (bad || name.length > 60) return c.json({ error: `Invalid ${bad ?? 'name'}` }, 400)
+  if (!writePrintState(editKey(file), name, settings)) return c.json({ error: 'Too many saved settings for this map; delete one first' }, 400)
+  return c.json({ ok: true })
+}
+app.put('/api/maps/:id/print', putPrintState)
+app.put('/api/maps/:id/print/:name', putPrintState)
+
+app.delete('/api/maps/:id/print/:name', (c) => {
+  const file = mapFile(c.req.param('id'))
+  if (!file) return c.notFound()
+  deletePrintCopy(editKey(file), c.req.param('name'))
+  return c.json({ ok: true })
+})
+
+/** Looks: tone settings saved by name, to use on any map. */
+app.get('/api/looks', (c) => c.json(readLooks()))
+
+const lookReply = (c: Context, result: ReturnType<typeof createLook>) =>
+  'error' in result ? c.json({ error: result.error }, result.status) : c.json(result)
+
+app.post('/api/looks', async (c) => {
+  const { name, look } = await c.req.json<{ name: unknown; look: Look }>()
+  return lookReply(c, createLook(name, look))
+})
+
+app.patch('/api/looks/:id', async (c) => {
+  const { name, look, isDefault } = await c.req.json<{ name?: unknown; look?: Look; isDefault?: boolean }>()
+  return lookReply(c, updateLook(Number(c.req.param('id')), { name, look, isDefault }))
+})
+
+app.delete('/api/looks/:id', (c) => {
+  deleteLook(Number(c.req.param('id')))
+  return c.json({ ok: true })
 })
 
 /** Streams progress as JSON lines, ending with the finished file's token. */

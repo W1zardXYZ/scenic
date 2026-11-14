@@ -58,6 +58,14 @@ Files in a folder named `Overlays`, or with "overlay" in their name, are shown a
 
 Runs start from the settings page, which shows how many scenes are waiting and, for OpenRouter, an estimated price. Turn on **Describe new scenes after each scan** to tag new maps automatically. With OpenRouter thumbnails leave your network; with a local server they stay on it. The key is stored in the data folder and never sent to the browser. To run a free model on a Mac on your network instead, see [`deploy/mac`](deploy/mac/README.md).
 
+## Print settings and looks
+
+The print studio keeps each map's settings as you change them (paper, scale, crop, hand-arranged sheets, tone, fog, export options), so a map opens as you left it. They are stored in the data folder and follow the file through rescans, moves and renames. **Saved** tab: save named copies of a map's settings, load one later, or **Load and create the export**, which makes the files again (they are cached, so repeating an earlier export is quick).
+
+A **look** is the tonal part of the settings only: ink mode, levels, curve, tone ranges, colour ranges, colour selections and the edge fade. Never paper, scale, grid, fog or marks. Under **Look → Look profiles**, save the current look by name, apply it to any map, update or rename it, or make it the one new maps start with. Applying copies the values into the map, so tweaking them never changes the look, and changing the look later never changes maps that used it; the map only shows whether it still matches. Colour selections hold the colours you picked, not map positions, so on another map they change whatever pixels are close to those colours, and nothing if there are none.
+
+Every settings section opens and closes from its header, remembers that in the browser, and shows a dot when it differs from the defaults, with a button to reset just that section.
+
 ## How the grid is found
 
 Scenic uses the most reliable evidence available:

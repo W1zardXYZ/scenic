@@ -1,3 +1,4 @@
+import type { Look } from '../shared/look.ts'
 import type { ScanRules } from '../shared/rules.ts'
 import type { AiSettings, AiStatus, FailedFile, Library, MapEdit, MapRecord, ScanStatus } from '../shared/types.ts'
 
@@ -6,6 +7,18 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await response.json().catch(() => null)
   if (!response.ok) throw new Error(body?.error ?? `Request failed (${response.status})`)
   return body as T
+}
+
+export interface SavedCopy {
+  name: string
+  saved: number
+  settings: unknown
+}
+
+export interface SavedLook {
+  id: number
+  name: string
+  look: Look
 }
 
 const send = (method: string, body?: unknown): RequestInit => ({
@@ -36,6 +49,15 @@ export const api = {
   edit: (ids: number[], patch: MapEdit) => json('/api/edits', send('POST', { ids, patch })),
   profile: (body: { kind: 'creator' | 'project'; creator: string; project?: string; patch: Record<string, string | null> }) => json('/api/profiles', send('POST', body)),
   tree: (body: object) => json<{ flattened?: number }>('/api/tree', send('POST', body)),
+  printState: (mapId: number) => json<{ working: unknown | null; saves: SavedCopy[] }>(`/api/maps/${mapId}/print`),
+  /** `keepalive` lets the last write finish while the page is being left. */
+  savePrintState: (mapId: number, settings: unknown, name = '', keepalive = false) =>
+    json(`/api/maps/${mapId}/print${name ? `/${encodeURIComponent(name)}` : ''}`, { ...send('PUT', { settings }), keepalive }),
+  deletePrintCopy: (mapId: number, name: string) => json(`/api/maps/${mapId}/print/${encodeURIComponent(name)}`, send('DELETE')),
+  looks: () => json<{ looks: SavedLook[]; defaultId: number | null }>('/api/looks'),
+  createLook: (name: string, look: Look) => json<{ id: number }>('/api/looks', send('POST', { name, look })),
+  updateLook: (id: number, patch: { name?: string; look?: Look; isDefault?: boolean }) => json(`/api/looks/${id}`, send('PATCH', patch)),
+  deleteLook: (id: number) => json(`/api/looks/${id}`, send('DELETE')),
   uploadImage: (file: File) => json<{ id: string; color: string }>('/api/profile-image', { method: 'POST', body: file }),
 }
 

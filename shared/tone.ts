@@ -339,3 +339,23 @@ export function filterPixels(rgb: Uint8Array, filter: Filter): { data: Uint8Arra
 /** True when the filter leaves every pixel as it is. */
 export const isPlain = (filter: Filter) => filter.mode === 'color' && isStraight(filter.curve) &&
   filter.bands.every((b) => b.amount === 0) && !needsPreparing(filter)
+
+const finite = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max
+const isToneCurve = (curve: unknown) => Array.isArray(curve) && curve.length >= 2 && curve.length <= MAX_CURVE_POINTS &&
+  curve.every((p, i) => Array.isArray(p) && p.length === 2 && finite(p[0], 0, 255) && finite(p[1], 0, 255) && (i === 0 || p[0] > curve[i - 1][0]))
+const isBand = (b: Band) => [b?.from, b?.to, b?.soft].every((v) => finite(v, 0, 255)) && b.from <= b.to && finite(b.amount, -1, 1)
+const isSelection = (s: Selection) => Array.isArray(s?.samples) && s.samples.length <= MAX_SAMPLES &&
+  s.samples.every((x) => typeof x?.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) && typeof x.subtract === 'boolean') &&
+  finite(s.fuzziness, FUZZINESS.min, FUZZINESS.max) && isToneCurve(s.curve) && finite(s.amount, -1, 1)
+
+/** Which part of a filter from outside (a request, a stored look) is unusable, or null when all of it is fine. */
+export function invalidFilter(f: Filter | undefined): string | null {
+  if (!f || !['color', 'grey', 'light', 'threshold'].includes(f.mode) || !finite(f.amount, 0, 1)) return 'filter'
+  const { black, white, gamma } = f.levels ?? {}
+  if (!finite(black, 0, 254) || !finite(white, 1, 255) || black >= white || !finite(gamma, 0.1, 10)) return 'levels'
+  if (!isToneCurve(f.curve)) return 'curve'
+  if (!Array.isArray(f.bands) || f.bands.length > MAX_BANDS || !f.bands.every(isBand)) return 'bands'
+  if (!Array.isArray(f.hues) || f.hues.length !== HUES.length || !f.hues.every((h) => finite(h, -1, 1))) return 'hues'
+  if (!Array.isArray(f.selections) || f.selections.length > MAX_SELECTIONS || !f.selections.every(isSelection)) return 'selections'
+  return null
+}

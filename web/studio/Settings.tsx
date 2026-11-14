@@ -5,7 +5,7 @@ import { circleCurve, withoutPart } from '../../shared/fog.ts'
 import { gridCandidates, PAPERS, type Plane, type Rect } from '../../shared/layout.ts'
 import type { MapRecord } from '../../shared/types.ts'
 import {
-  ColorChoice, ColorWell, Hint, IconButton, IconToggle, LengthField, NumberField, PanelGroup, Segmented, SelectField, SliderField, SwitchRow,
+  ColorChoice, ColorWell, Hint, IconButton, IconToggle, LengthField, NumberField, Segmented, SelectField, SliderField, SwitchRow,
 } from '@/components/controls'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -15,9 +15,16 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Toggle } from '@/components/ui/toggle'
 import { thumb } from '../api.ts'
-import type { Prefs } from '../filters.ts'
+import { DEFAULT_PREFS, type Prefs } from '../filters.ts'
+import { isNeutral, isStraight, NEUTRAL_LEVELS, NEW_FILTER, NO_HUES, STRAIGHT } from '../../shared/tone.ts'
 import { LevelsControl } from './LevelsControl.tsx'
-import { SelectionsControl, ToneControl } from './ToneControl.tsx'
+import { LooksControl } from './LooksControl.tsx'
+import { SavedControl } from './SavedControl.tsx'
+import { Section } from './Section.tsx'
+import { defaultOverlay, DEFAULT_MARKS } from './snapshot.ts'
+import { BandsControl, CurveControl, HuesControl, SelectionsControl } from './ToneControl.tsx'
+import type { Looks } from './use-looks.ts'
+import type { Saves } from './use-saves.ts'
 import type { Filter, FilterMode, Fog, FogDraw, FogItem, FogPart, FogShape, Grid, Marks, Overlay, Tool } from './types.ts'
 
 const SQUARE_PRESETS = [[String(25.4), '1 inch'], ['25', '25 mm'], ['30', '30 mm'], ['32', '32 mm']] as const
@@ -25,7 +32,7 @@ const OVERLAY_COLORS = ['#000000', '#ffffff', '#c23b32']
 const INK_MODES = [['color', 'Colour'], ['light', 'Saver'], ['grey', 'Grey'], ['threshold', 'B&W']] as const
 const PAPER_OPTIONS = PAPERS.map((p) => [p.id, p.label] as const)
 const FOG_PAPER_OPTIONS = [['map', 'Same as the map'] as const, ...PAPER_OPTIONS]
-const TAB = 'flex flex-col gap-8 pb-(--gutter)'
+const TAB = 'flex flex-col divide-y pb-(--gutter)'
 
 /** After a change that removes the focused control, once the new controls are on the page. */
 const focusIn = (box: React.RefObject<HTMLElement | null>, selector: string) =>
@@ -119,6 +126,7 @@ function FogRow({ item, sq, selected, change, remove, select }: {
 export const Settings = memo(function Settings({
   map, grid, changeGrid, setPixelsPerSquare, lockAspect, setLockAspect, gridDirty, saveGrid, prefs, changeSpec, setPrefs, crop, plane, changeCrop, looseCount, automaticCount,
   overlay, setOverlay, filter, setFilter, fadeMm, setFadeMm, marks, setMarks, fog, setFog, addFog, selectedFog, setSelectedFog, setFogDraw, setTool, tab, setTab, activeSelection, setActiveSelection, showMask, setShowMask,
+  resetGrid, looks, saves,
 }: {
   map: MapRecord
   grid: Grid
@@ -157,6 +165,9 @@ export const Settings = memo(function Settings({
   setActiveSelection: (index: number) => void
   showMask: boolean
   setShowMask: (show: boolean) => void
+  resetGrid: () => void
+  looks: Looks
+  saves: Saves
 }) {
   const sq = prefs.squareMm
   const estimated = map.gridSource === 'guess' || map.gridSource === 'pattern'
@@ -172,12 +183,13 @@ export const Settings = memo(function Settings({
           <TabsTrigger value="paper">Paper</TabsTrigger>
           <TabsTrigger value="look">Look</TabsTrigger>
           <TabsTrigger value="extras">Extras</TabsTrigger>
+          <TabsTrigger value="saved">Saved</TabsTrigger>
         </TabsList>
       </div>
 
       <ScrollArea className="min-h-0 flex-1 px-(--gutter)">
         <TabsContent value="scale" className={TAB}>
-          <PanelGroup title={grid.type === 'square' ? 'Square size' : 'Hex size'}>
+          <Section id="scale.size" title={grid.type === 'square' ? 'Square size' : 'Hex size'} changed={sq !== DEFAULT_PREFS.squareMm} onReset={() => changeSpec({ squareMm: DEFAULT_PREFS.squareMm })}>
             <Segmented
               label="Square size presets"
               value={SQUARE_PRESETS.find(([mm]) => Number(mm) === sq)?.[0] ?? ''}
@@ -185,10 +197,13 @@ export const Settings = memo(function Settings({
               onChange={(mm) => changeSpec({ squareMm: Number(mm) })}
             />
             <LengthField label="Custom" mm={sq} min={1} units={prefs.units} onChange={(squareMm) => changeSpec({ squareMm })} />
-          </PanelGroup>
+          </Section>
 
-          <PanelGroup
+          <Section
+            id="scale.grid"
             title="Map grid"
+            changed={gridDirty}
+            onReset={resetGrid}
             aside={<Badge variant={estimated ? 'warning' : 'secondary'}>{estimated ? 'Estimated' : map.gridSource === 'manual' ? 'Yours' : 'Detected'}</Badge>}
           >
             <Segmented label="Grid type" value={grid.type} options={[['square', 'Square'], ['hex', 'Hex flat'], ['hexPointy', 'Hex pointy']]} onChange={(type) => changeGrid({ type })} />
@@ -227,14 +242,11 @@ export const Settings = memo(function Settings({
               </CollapsibleContent>
             </Collapsible>
             {gridDirty && <Button variant="secondary" onClick={saveGrid}><Save data-icon="inline-start" />Remember for this map</Button>}
-          </PanelGroup>
+          </Section>
         </TabsContent>
 
         <TabsContent value="paper" className={TAB}>
-          <PanelGroup
-            title="Print area"
-            aside={crop ? <Button variant="ghost" size="sm" className="-my-1 -mr-2.5" onClick={() => { changeCrop(null); focusIn(printArea, 'button') }}><X data-icon="inline-start" />Clear</Button> : undefined}
-          >
+          <Section id="paper.area" title="Print area" changed={!!crop} onReset={() => { changeCrop(null); focusIn(printArea, 'button') }}>
             <div ref={printArea}>
             {crop ? (
               <div className="grid grid-cols-2 gap-3">
@@ -250,8 +262,13 @@ export const Settings = memo(function Settings({
               </div>
             )}
             </div>
-          </PanelGroup>
-          <PanelGroup>
+          </Section>
+          <Section
+            id="paper.paper"
+            title="Paper"
+            changed={prefs.paperId !== DEFAULT_PREFS.paperId || prefs.orientation !== DEFAULT_PREFS.orientation}
+            onReset={() => changeSpec({ paperId: DEFAULT_PREFS.paperId, orientation: DEFAULT_PREFS.orientation })}
+          >
             <SelectField label="Size" value={prefs.paperId} options={PAPER_OPTIONS} onChange={(paperId) => changeSpec({ paperId })} />
             <Segmented
               label="Orientation"
@@ -259,36 +276,109 @@ export const Settings = memo(function Settings({
               options={[['auto', 'Auto'], ['portrait', 'Portrait'], ['landscape', 'Landscape']]}
               onChange={(orientation) => changeSpec({ orientation })}
             />
-          </PanelGroup>
-          <PanelGroup>
+          </Section>
+          <Section
+            id="paper.margins"
+            title="Margins and overlap"
+            changed={prefs.marginMm !== DEFAULT_PREFS.marginMm || prefs.overlapMm !== DEFAULT_PREFS.overlapMm}
+            onReset={() => changeSpec({ marginMm: DEFAULT_PREFS.marginMm, overlapMm: DEFAULT_PREFS.overlapMm })}
+          >
             <div className="grid grid-cols-2 gap-3">
               <LengthField label="Margin" mm={prefs.marginMm} units={prefs.units} onChange={(marginMm) => changeSpec({ marginMm })} />
               <LengthField label="Overlap" mm={prefs.overlapMm} units={prefs.units} onChange={(overlapMm) => changeSpec({ overlapMm })} />
             </div>
             <Segmented label="Units" value={prefs.units} options={[['metric', 'Metric'], ['imperial', 'Imperial']]} onChange={(units) => setPrefs({ units })} />
-          </PanelGroup>
-          <SwitchRow
-            label="Cut along grid lines"
-            checked={prefs.seamsOnGrid}
-            onCheckedChange={(seamsOnGrid) => changeSpec({ seamsOnGrid })}
-            hint={prefs.seamsOnGrid && looseCount !== automaticCount ? `Off uses ${looseCount} sheets` : undefined}
-          />
-          <SwitchRow
-            label="Centre sheets on the print area"
-            hint="Off starts at the top left"
-            checked={prefs.centered}
-            onCheckedChange={(centered) => changeSpec({ centered })}
-          />
-          <SwitchRow
-            label="Show full sheet size"
-            hint={sheetHint}
-            checked={prefs.showSheets}
-            onCheckedChange={(showSheets) => setPrefs({ showSheets })}
-          />
+          </Section>
+          <Section
+            id="paper.layout"
+            title="Sheet layout"
+            changed={prefs.seamsOnGrid !== DEFAULT_PREFS.seamsOnGrid || prefs.centered !== DEFAULT_PREFS.centered}
+            onReset={() => changeSpec({ seamsOnGrid: DEFAULT_PREFS.seamsOnGrid, centered: DEFAULT_PREFS.centered })}
+          >
+            <SwitchRow
+              label="Cut along grid lines"
+              checked={prefs.seamsOnGrid}
+              onCheckedChange={(seamsOnGrid) => changeSpec({ seamsOnGrid })}
+              hint={prefs.seamsOnGrid && looseCount !== automaticCount ? `Off uses ${looseCount} sheets` : undefined}
+            />
+            <SwitchRow
+              label="Centre sheets on the print area"
+              hint="Off starts at the top left"
+              checked={prefs.centered}
+              onCheckedChange={(centered) => changeSpec({ centered })}
+            />
+            <SwitchRow
+              label="Show full sheet size"
+              hint={sheetHint}
+              checked={prefs.showSheets}
+              onCheckedChange={(showSheets) => setPrefs({ showSheets })}
+            />
+          </Section>
         </TabsContent>
 
         <TabsContent value="look" className={TAB}>
-          <PanelGroup>
+          <Section id="look.profiles" title="Look profiles">
+            <LooksControl looks={looks} />
+          </Section>
+          <Section
+            id="look.ink"
+            title="Ink"
+            changed={filter.mode !== NEW_FILTER.mode}
+            onReset={() => setFilter({ ...filter, mode: NEW_FILTER.mode, amount: NEW_FILTER.amount })}
+            aside={<span className="text-xs text-muted-foreground tabular-nums">{Math.round(map.ink * 100)}% coverage</span>}
+          >
+            <Segmented<FilterMode> label="Colour mode" value={filter.mode} options={INK_MODES} onChange={(mode) => setFilter({ ...filter, mode })} />
+            {(filter.mode === 'light' || filter.mode === 'threshold') && (
+              <SliderField
+                label={filter.mode === 'light' ? 'Lighten' : 'Cut-off'}
+                value={filter.amount}
+                display={`${Math.round(filter.amount * 100)}%`}
+                min={0.05}
+                max={0.95}
+                step={0.05}
+                onChange={(amount) => setFilter({ ...filter, amount })}
+              />
+            )}
+          </Section>
+          {(filter.mode === 'grey' || filter.mode === 'threshold') && (
+            <Section id="look.levels" title="Levels" changed={!isNeutral(filter.levels)} onReset={() => setFilter({ ...filter, levels: NEUTRAL_LEVELS })}>
+              <LevelsControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
+            </Section>
+          )}
+          <Section id="look.curve" title="Curve" changed={!isStraight(filter.curve)} onReset={() => setFilter({ ...filter, curve: STRAIGHT })}>
+            <CurveControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
+          </Section>
+          <Section id="look.ranges" title="Tone ranges" initiallyOpen={false} changed={filter.bands.length > 0} onReset={() => setFilter({ ...filter, bands: [] })}>
+            <BandsControl filter={filter} setFilter={setFilter} />
+          </Section>
+          <Section id="look.hues" title="Colour ranges" initiallyOpen={false} changed={filter.hues.some((h) => h !== 0)} onReset={() => setFilter({ ...filter, hues: NO_HUES })}>
+            <HuesControl filter={filter} setFilter={setFilter} />
+          </Section>
+          <Section id="look.selections" title="Colour selections" changed={filter.selections.length > 0} onReset={() => { setFilter({ ...filter, selections: [] }); setActiveSelection(0) }}>
+            <SelectionsControl
+              src={thumb(map, 'large')}
+              filter={filter}
+              setFilter={setFilter}
+              active={activeSelection}
+              setActive={setActiveSelection}
+              showMask={showMask}
+              setShowMask={setShowMask}
+              pick={() => setTool('pick')}
+            />
+          </Section>
+          <Section id="look.edges" title="Edges" initiallyOpen={false} changed={fadeMm > 0} onReset={() => setFadeMm(0)}>
+            <SliderField
+              label="Fade to paper"
+              value={fadeMm}
+              display={fadeMm ? `${fadeMm} mm` : 'Off'}
+              min={0}
+              max={FADE_MAX_MM}
+              step={1}
+              onChange={setFadeMm}
+            />
+            <p className="text-xs text-muted-foreground">Dissolves the outer edge of {crop ? 'the print area' : 'the map'} into the white of the paper and saves ink on dark maps. Seams between sheets are not faded.</p>
+          </Section>
+          <Section id="look.grid" title="Printed grid" changed={JSON.stringify(overlay) !== JSON.stringify(defaultOverlay(map))} onReset={() => setOverlay(defaultOverlay(map))}>
             <SwitchRow
               label="Print a grid"
               hint={map.hasGrid ? 'This file already has one' : undefined}
@@ -303,61 +393,20 @@ export const Settings = memo(function Settings({
                 {grid.type === 'hex' && <SwitchRow label="BattleTech hex numbers" checked={overlay.numbering} onCheckedChange={(numbering) => setOverlay({ ...overlay, numbering })} />}
               </>
             )}
-          </PanelGroup>
-          <PanelGroup title="Ink" aside={<span className="text-xs text-muted-foreground tabular-nums">{Math.round(map.ink * 100)}% coverage</span>}>
-            <Segmented<FilterMode> label="Colour mode" value={filter.mode} options={INK_MODES} onChange={(mode) => setFilter({ ...filter, mode })} />
-            {(filter.mode === 'light' || filter.mode === 'threshold') && (
-              <SliderField
-                label={filter.mode === 'light' ? 'Lighten' : 'Cut-off'}
-                value={filter.amount}
-                display={`${Math.round(filter.amount * 100)}%`}
-                min={0.05}
-                max={0.95}
-                step={0.05}
-                onChange={(amount) => setFilter({ ...filter, amount })}
-              />
-            )}
-            {(filter.mode === 'grey' || filter.mode === 'threshold') && (
-              <LevelsControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
-            )}
-          </PanelGroup>
-          <PanelGroup title="Tone">
-            <ToneControl src={thumb(map, 'large')} filter={filter} setFilter={setFilter} />
-          </PanelGroup>
-          <PanelGroup title="Colour selections">
-            <SelectionsControl
-              src={thumb(map, 'large')}
-              filter={filter}
-              setFilter={setFilter}
-              active={activeSelection}
-              setActive={setActiveSelection}
-              showMask={showMask}
-              setShowMask={setShowMask}
-              pick={() => setTool('pick')}
-            />
-          </PanelGroup>
-          <PanelGroup title="Edges">
-            <SliderField
-              label="Fade to paper"
-              value={fadeMm}
-              display={fadeMm ? `${fadeMm} mm` : 'Off'}
-              min={0}
-              max={FADE_MAX_MM}
-              step={1}
-              onChange={setFadeMm}
-            />
-            <p className="text-xs text-muted-foreground">Dissolves the outer edge of {crop ? 'the print area' : 'the map'} into the white of the paper and saves ink on dark maps. Seams between sheets are not faded.</p>
-          </PanelGroup>
+          </Section>
         </TabsContent>
 
         <TabsContent value="extras" className={TAB}>
-          <PanelGroup>
+          <Section id="extras.marks" title="Marks" changed={JSON.stringify(marks) !== JSON.stringify(DEFAULT_MARKS)} onReset={() => setMarks(DEFAULT_MARKS)}>
             <SwitchRow label="Cut marks" checked={marks.cut} onCheckedChange={(cut) => setMarks({ ...marks, cut })} />
             <SwitchRow label="Sheet labels" checked={marks.labels} onCheckedChange={(labels) => setMarks({ ...marks, labels })} />
             <SwitchRow label="Assembly sheet" hint="Overview and a scale check" checked={marks.overview} onCheckedChange={(overview) => setMarks({ ...marks, overview })} />
-          </PanelGroup>
-          <PanelGroup
+          </Section>
+          <Section
+            id="extras.fog"
             title="Fog of war"
+            changed={fog.items.length > 0}
+            onReset={() => { setFog({ ...fog, items: [] }); setSelectedFog([]) }}
             aside={fog.items.length > 0 ? <ColorWell label="Fog cover colour" value={fog.fill} onChange={(fill) => setFog({ ...fog, fill })} /> : undefined}
           >
             <div ref={fogBox} className="flex flex-col gap-3">
@@ -411,7 +460,13 @@ export const Settings = memo(function Settings({
                 </>
               )}
             </div>
-          </PanelGroup>
+          </Section>
+        </TabsContent>
+
+        <TabsContent value="saved" className={TAB}>
+          <Section id="saved.copies" title="Saved settings">
+            <SavedControl saves={saves} />
+          </Section>
         </TabsContent>
       </ScrollArea>
     </Tabs>
