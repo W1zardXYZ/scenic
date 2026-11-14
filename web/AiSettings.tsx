@@ -145,7 +145,7 @@ export function AiSettingsForm({ onChanged }: { onChanged: () => void }) {
             value={draft.model}
             list={listId}
             onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-            placeholder="e.g. qwen/qwen2.5-vl-72b-instruct"
+            placeholder="e.g. qwen3-vl:8b-instruct on Ollama"
             hint={picked?.perScene != null ? `About ${dollars(picked.perScene)} per scene` : 'It must be able to read images.'}
           />
           <datalist id={listId}>{models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</datalist>
